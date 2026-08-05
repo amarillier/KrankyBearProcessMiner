@@ -1,0 +1,35 @@
+{
+  "_meta": {
+    "locale": "en",
+    "version": 1,
+    "note": "Source UI string catalog. Keys are dot-paths; values are the English text. Translators: keep every key path identical, translate only the values, and preserve {{placeholders}} and product tokens (app name, file names, URLs, CLI flags) verbatim.",
+    "translation_workflow": "Regenerate xx.json from this file with an AI pass, then native-review."
+  },
+  "app": {
+    "name": "Template App"
+  },
+  "common": {
+    "ok": "OK",
+    "cancel": "Cancel",
+    "close": "Close",
+    "save": "Save",
+    "apply": "Apply",
+    "remove": "Remove",
+    "yes": "Yes",
+    "no": "No"
+  },
+  "windows": {
+    "help_title": "{{app_name}} - Help",
+    "about_title": "About {{app_name}}",
+    "preferences_title": "Preferences"
+  },
+  "preferences": {
+    "section_appearance": "Appearance",
+    "language_label": "Language",
+    "language_restart_note": "Restart {{app_name}} for the language change to take effect."
+  },
+  "locale_labels": {
+    "_comment": "Native endonyms for each supported UI language.",
+    "en": "English"
+  }
+}

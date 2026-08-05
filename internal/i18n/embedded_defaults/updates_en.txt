@@ -1,0 +1,5 @@
+Current Version: {{version}}
+
+Visit the releases page to see the latest version and download an update.
+
+{{releases_url}}

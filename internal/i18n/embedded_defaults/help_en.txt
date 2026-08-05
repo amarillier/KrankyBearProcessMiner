@@ -1,0 +1,9 @@
+{{app_name}} - Help
+
+OVERVIEW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Replace this placeholder help document with your application's help content.
+It is loaded via i18n.HelpBody(appName); {{app_name}} is substituted at runtime.
+
+Translators: the per-locale file is assets/i18n/help_<code>.txt; keep the section
+structure and replace only the prose.

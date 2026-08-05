@@ -1,0 +1,47 @@
+Release notes
+KrankyBear ProcessMiner -- cross-platform (Windows, Linux, macOS) process/system monitor
+
+Future ideas:
+(none right now -- see "Some day maybe" below for deferred ideas)
+
+Some day maybe - defer for now
+- Task manager like process view with collapsible sections under primary process -- deferred in favor of a simpler approach: keep the current flat/detailed view as-is, and add an alternate "parent processes only" view (top-level processes, no children rows cluttering the list). Clicking a parent in that view opens a separate window showing only that process's children. Only one such child window open at a time -- clicking a different parent swaps its contents rather than opening another window. Start with a read-only children list; add sort/filter/End Process to that window later once the basic approach is proven.
+- Allow expanded visualizations with a different window with bigger display and detail level
+
+
+Version 0.1.0 - August 5, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW Cross platform process miner application
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- initial checkin
+- Windows, Linux and MacOS process miner application
+
+✨ NEW Resizable, persisted layout
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- draggable divider between the process table and the detail pane, and
+  between the detail info and its children list; both positions persist
+  across launches alongside the main window size
+- long process names are ellipsized to fit the Name column instead of
+  overflowing into the next one
+
+✨ NEW Hide All / Show All windows
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Alt+H boss-key hotkey (mirrored in a new Window menu and the system tray)
+  hides the main window and any open About/Help/Update windows together;
+  Show All brings back exactly that same set
+
+✨ NEW "Top CPU" / "Top Mem" consumer filter
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Off / >=1% / >=5% / >=10% / >=25%, independently adjustable for CPU and
+  Mem, combined with the existing name filter -- narrows a busy process
+  list down to whatever's actually using resources
+- known gap: no per-process disk or network figures are sampled yet, so
+  this covers CPU/Mem only for now
+
+✨ IMPROVED Steady-state CPU usage cut from over 30% to roughly 9%
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- cmdline, start time, and live status are now fetched on demand for only
+  the selected process, instead of for every process on every sample tick
+- on macOS specifically, this avoids a gopsutil trap: Status() forks a `ps`
+  subprocess per call, so sampling it for the whole process list every
+  tick meant hundreds of process forks a second
