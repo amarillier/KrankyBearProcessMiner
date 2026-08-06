@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,9 @@ const (
 	sortUser
 	sortCPU
 	sortMem
+	sortDiskRead
+	sortDiskWrite
+	sortPrivate
 )
 
 type procColumn struct {
@@ -38,6 +42,9 @@ var procColumns = []procColumn{
 	{"User", sortUser, 110},
 	{"CPU %", sortCPU, 70},
 	{"Mem %", sortMem, 70},
+	{"Disk R", sortDiskRead, 80},
+	{"Disk W", sortDiskWrite, 80},
+	{"Private", sortPrivate, 90},
 }
 
 // consumerThresholdOptions/-Values back the "Top CPU"/"Top Mem" selects
@@ -80,18 +87,22 @@ func clampSplitOffset(v float64) float64 {
 // callbacks are fyne.Do-wrapped by main.go, and widget callbacks already run
 // on the main goroutine), so -- like Sampler -- no mutex is needed.
 type procViewState struct {
+	app     fyne.App
 	win     fyne.Window
 	sampler *Sampler
 
-	full        ProcessSnapshot
-	displayRows []ProcInfo
-	byPID       map[int32]ProcInfo
-	filterText  string
-	minCPU      float64 // "top consumer" thresholds; 0 = off (see passesConsumerThreshold)
-	minMem      float64
-	sortCol     sortField
-	sortAsc     bool
-	selectedPID int32 // -1 = none
+	full           ProcessSnapshot
+	displayRows    []ProcInfo
+	byPID          map[int32]ProcInfo
+	filterText     string
+	useRegexFilter bool
+	filterRegex    *regexp.Regexp // compiled from filterText when useRegexFilter is on; nil if off, empty, or invalid (fails open -- see recompileFilterRegex)
+	minCPU         float64        // "top consumer" thresholds; 0 = off (see passesConsumerThreshold)
+	minMem         float64
+	parentsOnly    bool // "Parent processes" view -- see isParentRow
+	sortCol        sortField
+	sortAsc        bool
+	selectedPID    int32 // -1 = none
 
 	table       *widget.Table
 	filterEntry *widget.Entry
@@ -103,6 +114,15 @@ type procViewState struct {
 	detailCmdline  *widget.Label
 	detailChildren []ProcInfo
 	childList      *widget.List
+
+	// childWin is the single reusable "<parent> Children" drill-down window
+	// opened from the Parent-processes view (see showChildWindow) -- only
+	// one is ever open at a time; clicking a different parent updates it in
+	// place rather than opening a second window.
+	childWin     fyne.Window
+	childWinPID  int32
+	childWinList *widget.List
+	childWinRows []ProcInfo
 }
 
 // newProcessView builds the process table, toolbar and detail pane. The
@@ -118,9 +138,11 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	saveLayout func(),
 ) {
 	st := &procViewState{
+		app:         a,
 		win:         win,
 		sampler:     sampler,
 		selectedPID: -1,
+		childWinPID: -1,
 		sortCol:     sortCPU,
 		sortAsc:     false,
 	}
@@ -142,8 +164,30 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	topInfo, childrenSection := st.buildDetailPane()
 
 	st.filterEntry = widget.NewEntry()
-	st.filterEntry.SetPlaceHolder("Filter by name…")
+	st.filterEntry.SetPlaceHolder("Filter by name… (using regex? check the Regex box too)")
 	st.filterEntry.OnChanged = st.setFilter
+
+	// Regex mode swaps the name filter from a plain substring match to a
+	// real Go regexp.MatchString against the process name -- e.g.
+	// ^(?i)(process|activity).* to compare just ProcessMiner's own
+	// processes against Activity Monitor's, with nothing else cluttering
+	// the list. An invalid (or mid-typing incomplete) regex fails open --
+	// shows every row -- rather than going blank or erroring, since a regex
+	// is often invalid for several keystrokes while being typed.
+	regexCheck := widget.NewCheck("Regex", func(checked bool) {
+		st.useRegexFilter = checked
+		st.recompileFilterRegex()
+		st.applyFilterAndRefresh()
+	})
+
+	// "Parent processes" view: declutters the table down to processes worth
+	// drilling into (see isParentRow) -- clicking a row then opens/updates
+	// the single children drill-down window (showChildWindow) instead of
+	// just the inline detail pane's own (still-present) children list.
+	parentsOnlyCheck := widget.NewCheck("Parent processes only", func(checked bool) {
+		st.parentsOnly = checked
+		st.applyFilterAndRefresh()
+	})
 
 	intervalSelect := widget.NewSelect([]string{"1s", "2s", "5s", "10s"}, func(sel string) {
 		if d, err := time.ParseDuration(sel); err == nil {
@@ -174,14 +218,22 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	st.endBtn.Importance = widget.DangerImportance
 	st.endBtn.Disable()
 
-	toolbar := container.NewBorder(nil, nil, nil,
-		container.NewHBox(
-			widget.NewLabel("Top CPU"), cpuThresholdSelect,
-			widget.NewLabel("Top Mem"), memThresholdSelect,
-			refreshBtn, widget.NewLabel("Refresh every"), intervalSelect, st.endBtn,
-		),
+	// Filter gets its own row so the entry actually has room -- crammed onto
+	// one row alongside every other toolbar control (as it was originally),
+	// it was too narrow to read or type a regex into comfortably.
+	filterRow := container.NewBorder(nil, nil, nil,
+		container.NewHBox(regexCheck, refreshBtn, widget.NewLabel("Refresh every"), intervalSelect),
 		st.filterEntry,
 	)
+
+	optionsRow := container.NewHBox(
+		parentsOnlyCheck,
+		widget.NewLabel("Top CPU"), cpuThresholdSelect,
+		widget.NewLabel("Top Mem"), memThresholdSelect,
+		st.endBtn,
+	)
+
+	toolbar := container.NewVBox(filterRow, optionsRow)
 
 	tableSection := container.NewBorder(toolbar, nil, nil, nil, st.table)
 
@@ -261,6 +313,7 @@ func (st *procViewState) buildDetailPane() (topInfo, childrenSection fyne.Canvas
 func (st *procViewState) applySnapshot(snap ProcessSnapshot) {
 	st.full = snap
 	st.recompute()
+	st.refreshChildWindow()
 
 	if idx, ok := indexOfPID(st.displayRows, st.selectedPID); ok {
 		st.table.Select(widget.TableCellID{Row: idx, Col: 0})
@@ -279,13 +332,26 @@ func (st *procViewState) recompute() {
 		st.byPID[p.PID] = p
 	}
 
-	needle := strings.ToLower(strings.TrimSpace(st.filterText))
+	// hasChildPID marks every PID that is some other process's parent --
+	// computed once here rather than calling childrenOf per row (which would
+	// be an O(n^2) scan of st.byPID for every row) -- see isParentRow.
+	var hasChildPID map[int32]bool
+	if st.parentsOnly {
+		hasChildPID = make(map[int32]bool, len(st.full.Procs))
+		for _, p := range st.full.Procs {
+			hasChildPID[p.PPID] = true
+		}
+	}
+
 	rows := make([]ProcInfo, 0, len(st.full.Procs))
 	for _, p := range st.full.Procs {
-		if needle != "" && !strings.Contains(strings.ToLower(p.Name), needle) {
+		if !st.matchesNameFilter(p.Name) {
 			continue
 		}
 		if !st.passesConsumerThreshold(p) {
+			continue
+		}
+		if st.parentsOnly && !st.isParentRow(p, hasChildPID) {
 			continue
 		}
 		rows = append(rows, p)
@@ -320,6 +386,54 @@ func (st *procViewState) passesConsumerThreshold(p ProcInfo) bool {
 	return false
 }
 
+// isParentRow implements the "Parent processes" view's declutter rule: a
+// process is kept if it has at least one child (worth drilling into --
+// e.g. a browser with a dozen helper processes), OR if its own parent isn't
+// in the current snapshot (an orphan/root has nothing to be nested under).
+// A childless process whose parent IS visible is hidden here -- it surfaces
+// instead in that parent's own children drill-down window (childrenOf).
+func (st *procViewState) isParentRow(p ProcInfo, hasChildPID map[int32]bool) bool {
+	if hasChildPID[p.PID] {
+		return true
+	}
+	_, parentVisible := st.byPID[p.PPID]
+	return !parentVisible
+}
+
+// matchesNameFilter applies the name filter: plain case-insensitive
+// substring match by default, or a real regexp match when useRegexFilter is
+// on (see recompileFilterRegex). An empty filter, or a regex that failed to
+// compile, matches everything.
+func (st *procViewState) matchesNameFilter(name string) bool {
+	if st.useRegexFilter {
+		if st.filterRegex == nil {
+			return true // off, empty, or invalid/mid-typing regex -- fail open
+		}
+		return st.filterRegex.MatchString(name)
+	}
+	needle := strings.ToLower(strings.TrimSpace(st.filterText))
+	return needle == "" || strings.Contains(strings.ToLower(name), needle)
+}
+
+// recompileFilterRegex recompiles filterRegex from the current filterText
+// whenever it or useRegexFilter changes. A compile failure (including an
+// incomplete pattern mid-typing) leaves filterRegex nil, which
+// matchesNameFilter treats as "no filter" rather than erroring or hiding
+// every row.
+func (st *procViewState) recompileFilterRegex() {
+	st.filterRegex = nil
+	if !st.useRegexFilter {
+		return
+	}
+	needle := strings.TrimSpace(st.filterText)
+	if needle == "" {
+		return
+	}
+	if re, err := regexp.Compile(needle); err == nil {
+		st.filterRegex = re
+	}
+}
+
 func compareProc(a, b ProcInfo, field sortField) int {
 	switch field {
 	case sortPID:
@@ -334,6 +448,12 @@ func compareProc(a, b ProcInfo, field sortField) int {
 		return cmpFloat64(a.CPUPercent, b.CPUPercent)
 	case sortMem:
 		return cmpFloat64(float64(a.MemPercent), float64(b.MemPercent))
+	case sortDiskRead:
+		return cmpFloat64(a.DiskReadKBs, b.DiskReadKBs)
+	case sortDiskWrite:
+		return cmpFloat64(a.DiskWriteKBs, b.DiskWriteKBs)
+	case sortPrivate:
+		return cmpUint64(a.PrivateBytes, b.PrivateBytes)
 	default:
 		return 0
 	}
@@ -351,6 +471,17 @@ func cmpInt32(a, b int32) int {
 }
 
 func cmpFloat64(a, b float64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cmpUint64(a, b uint64) int {
 	switch {
 	case a < b:
 		return -1
@@ -399,6 +530,16 @@ func (st *procViewState) updateCell(id widget.TableCellID, o fyne.CanvasObject) 
 		label.SetText(fmt.Sprintf("%.1f", p.CPUPercent))
 	case sortMem:
 		label.SetText(fmt.Sprintf("%.1f", p.MemPercent))
+	case sortDiskRead:
+		label.SetText(fmt.Sprintf("%.0f K/s", p.DiskReadKBs))
+	case sortDiskWrite:
+		label.SetText(fmt.Sprintf("%.0f K/s", p.DiskWriteKBs))
+	case sortPrivate:
+		if p.PrivateBytes == 0 {
+			label.SetText("N/A")
+		} else {
+			label.SetText(formatBytes(p.PrivateBytes))
+		}
 	}
 }
 
@@ -438,6 +579,7 @@ func (st *procViewState) toggleSort(field sortField) {
 
 func (st *procViewState) setFilter(text string) {
 	st.filterText = text
+	st.recompileFilterRegex()
 	st.applyFilterAndRefresh()
 }
 
@@ -468,6 +610,9 @@ func (st *procViewState) onRowSelected(id widget.TableCellID) {
 	p := st.displayRows[id.Row]
 	st.selectedPID = p.PID
 	st.renderDetail(p)
+	if st.parentsOnly {
+		st.showChildWindow(p)
+	}
 }
 
 func (st *procViewState) onRowUnselected(widget.TableCellID) {
@@ -558,6 +703,64 @@ func (st *procViewState) clearDetail() {
 	st.detailChildren = nil
 	st.childList.Refresh()
 	st.endBtn.Disable()
+}
+
+// ── Parent-processes view: children drill-down window ──────────────────────
+
+// showChildWindow opens the single reusable children drill-down window for
+// p, or updates it in place if it's already open for a different parent --
+// only one is ever open at a time (see procViewState.childWin). Read-only by
+// design for this first cut: no sort/filter/End Process here yet, just a
+// quick way to see what a decluttered parent row is hiding.
+func (st *procViewState) showChildWindow(p ProcInfo) {
+	st.childWinPID = p.PID
+
+	if st.childWin == nil {
+		st.childWin = st.app.NewWindow("")
+		st.childWin.SetIcon(resourceKrankyBearProcessMinerPng)
+		st.childWinList = widget.NewList(
+			func() int { return len(st.childWinRows) },
+			func() fyne.CanvasObject { return widget.NewLabel("") },
+			func(i widget.ListItemID, o fyne.CanvasObject) {
+				c := st.childWinRows[i]
+				o.(*widget.Label).SetText(fmt.Sprintf("%s (PID %d) — CPU %.1f%%  Mem %.1f%%", c.Name, c.PID, c.CPUPercent, c.MemPercent))
+			},
+		)
+		st.childWin.SetContent(container.NewPadded(st.childWinList))
+		st.childWin.Resize(fyne.NewSize(420, 480))
+		// A plain close (not hide-and-reuse like About/Help/Update): this
+		// window tracks one specific live process, so there's nothing
+		// worth restoring later -- just forget it and build fresh next time.
+		st.childWin.SetOnClosed(func() {
+			st.childWin = nil
+			st.childWinPID = -1
+			st.childWinRows = nil
+		})
+	}
+
+	st.refreshChildWindow()
+	st.childWin.Show()
+	st.childWin.RequestFocus()
+}
+
+// refreshChildWindow re-reads the tracked parent's children from the
+// current byPID snapshot. Called after every recompute() so the drill-down
+// window stays live while open, the same way the main table does. No-op if
+// no child window is open.
+func (st *procViewState) refreshChildWindow() {
+	if st.childWin == nil {
+		return
+	}
+	parent, ok := st.byPID[st.childWinPID]
+	if !ok {
+		st.childWin.SetTitle("(process exited)")
+		st.childWinRows = nil
+		st.childWinList.Refresh()
+		return
+	}
+	st.childWin.SetTitle(fmt.Sprintf("%s (PID %d) — Children", parent.Name, parent.PID))
+	st.childWinRows = childrenOf(st.byPID, st.childWinPID)
+	st.childWinList.Refresh()
 }
 
 // parentChain walks PPID upward from pid, returning immediate-parent-first.

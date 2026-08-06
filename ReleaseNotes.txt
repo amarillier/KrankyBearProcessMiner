@@ -2,11 +2,134 @@ Release notes
 KrankyBear ProcessMiner -- cross-platform (Windows, Linux, macOS) process/system monitor
 
 Future ideas:
-(none right now -- see "Some day maybe" below for deferred ideas)
+(none right now)
 
-Some day maybe - defer for now
-- Task manager like process view with collapsible sections under primary process -- deferred in favor of a simpler approach: keep the current flat/detailed view as-is, and add an alternate "parent processes only" view (top-level processes, no children rows cluttering the list). Clicking a parent in that view opens a separate window showing only that process's children. Only one such child window open at a time -- clicking a different parent swaps its contents rather than opening another window. Start with a read-only children list; add sort/filter/End Process to that window later once the basic approach is proven.
-- Allow expanded visualizations with a different window with bigger display and detail level
+Some day maybe, maybe never - defer for now
+- Network user per process - unlikely since gopsutil does not have access to this.
+- GPU resource use - Windows only since not readily available for Mac/Linux, maybe some day if we perceive value
+- Process CPU affinity / priority controls -- scrapped rather than deferred: affinity has no real macOS support at all (Apple's affinity API is advisory-only, a non-starter on Apple Silicon), and priority is a rare power-user action for most people. Not worth the cross-platform inconsistency for the value.
+- Sort/filter/End Process in the Parent-processes view's children drill-down window, once the current read-only version has proven useful
+- Aggregate CPU%/Mem% across a parent + all its descendants in the Parent-processes view (Task Manager-style grouped totals), instead of showing just the parent row's own usage
+- Single-instance enforcement (launching a second copy brings the running one to the foreground and exits instead) -- bigger lift than the others here, needs real cross-process IPC plus platform-specific window activation, not just "is it already running" detection. Alternative - simply detect a current process, open a window indicating that with an option to close - don't actually bring the other to the foreground should be much simpler.
+
+Version 0.2.0 - August 06, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW Resource Details window
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Click any of the top-strip mini graphs (CPU/Memory/Disk/Network) to open
+  a bigger, clearer view of just that one resource, Task Manager-style: a
+  resizable list to switch between the four, one large graph for whichever
+  is selected. All four keep recording history in the background even
+  while not the one shown, so switching between them never shows a blank
+  graph.
+- The big graph shows value-axis gridlines (%/KB/s) and a time axis
+  (elapsed time back from "now") so peaks and the visible time span are
+  actually readable, not just eyeballed.
+- Also reachable from the View menu / system tray ("Resource Details"),
+  and included in Hide All / Show All like every other secondary window.
+- Top consumers list: for CPU, Memory, and Disk, shows the processes
+  actually driving that resource (name + its value for just that metric),
+  filtered by an adjustable threshold (Off / ≥1% / ≥5% / ≥10% / ≥25% for
+  CPU/Mem; Off / ≥10 / ≥100 / ≥500 / ≥1000 KB/s for Disk) rather than a
+  fixed "top N", capped at 8 rows regardless of how many clear the
+  threshold. Not available for Network -- there's no per-process network
+  API to draw from (same gap noted elsewhere in this app).
+
+✨ FIXED Disk/Network graphs could show a garbage auto-scale after launch
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The very first system sample after launch diffed disk/network byte
+  counters against a zero baseline instead of skipping the first tick, so
+  it reported the *entire* cumulative bytes read/sent since boot as a
+  one-second "rate" -- a huge one-off outlier. Since the graphs auto-scale
+  to their own visible max, that single spike dominated the axis (e.g.
+  "473199313 KB/s") and squashed all real data into an invisible sliver
+  until the outlier aged out of the buffer (2-5 minutes). CPU/Memory were
+  never affected (fixed 0-100% scale, immune to this). Now the first
+  sample only records a baseline and reports no rate, same as the
+  per-process Disk R/W columns already did correctly.
+
+✨ NEW Regex process-name filter
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- "Regex" checkbox next to the name filter switches it from a plain
+  substring match to a real regexp match against the process name -- e.g.
+  ^(?i)(process|activity).* to compare just this app's own processes
+  against Activity Monitor's, with nothing else cluttering the list.
+- An invalid or still-being-typed regex fails open (shows every row)
+  rather than going blank or erroring.
+- Note: this still combines with "Parent processes only" via AND, same as
+  the existing Top CPU/Mem filters -- a process with no children of its
+  own gets hidden by that view regardless of whether it also matches the
+  name filter.
+- The filter entry now has its own toolbar row (with Regex, Refresh Now,
+  Refresh every), instead of squeezed onto one row with every other
+  control -- it was too narrow to type a regex into comfortably.
+
+✨ NEW System Info window
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- A point-in-time summary (View menu / system tray): computer name and
+  OS/platform/version/architecture, CPU model/cores/logical processors/
+  speed, total memory, mounted disk volumes with size, and network
+  adapters with type (wired/wireless), connected status, and WiFi signal
+  strength where applicable.
+- "Copy to Clipboard" button copies the whole summary as plain text --
+  handy for a bug report or comparing against another machine.
+- CPU speed shows N/A rather than a misleading "0.00 GHz" when gopsutil
+  can't report it. Apple Silicon doesn't return a clean 0 for this --
+  empirically it's some other meaningless counter (4 on an M4 Pro), which
+  slipped past an initial `<= 0` check; fixed with a "no real CPU has run
+  this slow in decades" floor (100 MHz) instead of exactly 0.
+- "Copy to Clipboard" now confirms the copy happened -- the button relabels
+  to "Copied to Clipboard ✓" and turns green for 2 seconds, since clicking
+  it otherwise gave no feedback that anything had happened.
+- Network adapter type is a name-pattern heuristic (wlan/eth/en0 etc.),
+  not a guaranteed-accurate classification for unusual adapter names.
+- WiFi signal strength: a real API on Linux (github.com/mdlayher/wifi,
+  pure Go, no shell-out); a standard-tool shell-out on macOS
+  (system_profiler) and Windows (netsh) -- neither OS has a comparably
+  simple non-shell option (the real alternative is cgo+Objective-C or raw
+  WLAN-API syscall struct marshaling, more code and more fragile than a
+  one-line shell-out and text parse).
+- Disk volumes are mounted filesystems (gopsutil's view), not raw physical
+  disks -- there's no simple cross-platform API for the latter.
+- The window now opens immediately with a "Collecting system info…" message
+  and spinner while gathering runs in the background, instead of the whole
+  app appearing to freeze until it's done. On macOS specifically, gathering
+  can genuinely take 10+ seconds: system_profiler (used for WiFi signal
+  strength) takes ~8s on its own regardless of -detailLevel, and there's no
+  fast non-privileged alternative (wdutil info is near-instant but needs
+  sudo; the legacy airport binary that used to be fast no longer exists on
+  current macOS).
+- Fixed: the loading message briefly rendered one character per line. It
+  was wrapped in container.NewCenter, which sizes to the child's own
+  MinSize -- an unconstrained wrapping Label's MinSize degenerates to
+  almost nothing, so it wrapped at the narrowest possible width instead of
+  real word boundaries. A plain VBox gives it the container's full width.
+
+✨ NEW Per-process Disk I/O and Private memory columns
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Disk R / Disk W columns show live per-process read/write KB/s (diffed
+  between samples, the same way the top-strip Disk graph works). Shows
+  N/A for processes owned by another user/system account, same as any
+  other permission-restricted field.
+- Private column: on Windows this is real Private Bytes (Commit Charge);
+  on Linux it's RSS minus shared pages, the standard approximation where
+  there's no single "private bytes" figure. Shows N/A on macOS -- the
+  closest gopsutil figure there is reserved virtual address space (often
+  >1TB for a browser renderer), not actual private memory, so showing it
+  would be actively misleading rather than just incomplete.
+
+✨ NEW "Parent processes" view
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- "Parent processes only" checkbox declutters the table down to processes
+  worth drilling into: anything with at least one child (e.g. a browser
+  with a dozen helper processes), plus anything with no visible parent of
+  its own. Everything else (a childless process whose parent IS shown) is
+  hidden from this view -- it's still there, just one click away.
+- Click a parent row to open (or update) a single read-only "Children"
+  window listing that process's direct children with live CPU%/Mem%; only
+  one such window is ever open, and clicking a different parent swaps its
+  contents into it rather than opening another. No sort/filter/End Process
+  in that window yet -- starting simple to prove the approach out first.
 
 
 Version 0.1.0 - August 5, 2026

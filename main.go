@@ -15,7 +15,7 @@ import (
 
 const (
 	// appName    = "KrankyBear ProcessMiner"
-	appVersion = "0.1.0" // see FyneApp.toml
+	appVersion = "0.2.0" // see FyneApp.toml
 	appAuthor  = "Allan Marillier"
 	appID      = "com.github.amarillier.KrankyBearProcessMiner"
 )
@@ -57,17 +57,28 @@ func main() {
 	win.SetIcon(resourceKrankyBearProcessMinerPng)
 	win.Resize(mainWindowLaunchSize(a)) // restore previous size (size only - Fyne can't restore position)
 
-	graphsView, updateGraphs := newSystemGraphsView()
+	updateResourceDetail, updateResourceDetailProcesses, showResourceDetail := newResourceDetailWindow(a)
+	graphsView, updateGraphs := newSystemGraphsView(showResourceDetail)
 	procSampler = NewSampler()
 	processView, applyProcessSnapshot, refreshNow, endSelected, saveLayout := newProcessView(a, win, procSampler)
 	saveProcessLayout = saveLayout
 
-	procSampler.OnSystemSnapshot(func(s SystemSnapshot) { fyne.Do(func() { updateGraphs(s) }) })
-	procSampler.OnProcessSnapshot(func(s ProcessSnapshot) { fyne.Do(func() { applyProcessSnapshot(s) }) })
+	procSampler.OnSystemSnapshot(func(s SystemSnapshot) {
+		fyne.Do(func() {
+			updateGraphs(s)
+			updateResourceDetail(s)
+		})
+	})
+	procSampler.OnProcessSnapshot(func(s ProcessSnapshot) {
+		fyne.Do(func() {
+			applyProcessSnapshot(s)
+			updateResourceDetailProcesses(s)
+		})
+	})
 
 	win.SetContent(container.NewBorder(graphsView, nil, nil, nil, processView))
-	win.SetMainMenu(buildMenu(a, win, refreshNow, endSelected))
-	setupSystemTray(a, win, refreshNow, endSelected)
+	win.SetMainMenu(buildMenu(a, win, refreshNow, endSelected, showResourceDetail))
+	setupSystemTray(a, win, refreshNow, endSelected, showResourceDetail)
 
 	// Boss-key hide (CLAUDE.md "Hide all / show all windows"): no matching
 	// show/resume hotkey by design -- canvas shortcuts only fire on a
@@ -136,7 +147,7 @@ func quitApp(a fyne.App, win fyne.Window) {
 
 // ── Menu + tray (mirror each other; see CLAUDE.md "System tray + main menu") ──
 
-func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func()) *fyne.MainMenu {
+func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func(), showResourceDetail func(resourceKind)) *fyne.MainMenu {
 	fileMenu := fyne.NewMenu("File",
 		fyne.NewMenuItem("Quit", func() { fyne.Do(func() { quitApp(a, win) }) }),
 	)
@@ -144,6 +155,9 @@ func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func()) *fyn
 		fyne.NewMenuItem("Light Theme", func() { setLightTheme(a) }),
 		fyne.NewMenuItem("Dark Theme", func() { setDarkTheme(a) }),
 		fyne.NewMenuItem("System Theme", func() { setSystemTheme(a) }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Resource Details", func() { showResourceDetail(resCPU) }),
+		fyne.NewMenuItem("System Info", func() { showSystemInfo(a) }),
 	)
 	processMenu := fyne.NewMenu("Process",
 		fyne.NewMenuItem("Refresh Now", refreshNow),
@@ -164,7 +178,7 @@ func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func()) *fyn
 // setupSystemTray mirrors the main menu. Tray callbacks fire off the main
 // goroutine, so every body is wrapped in fyne.Do (CLAUDE.md "fyne.Do is
 // mandatory").
-func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func()) {
+func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func(), showResourceDetail func(resourceKind)) {
 	desk, ok := a.(desktop.App)
 	if !ok {
 		return // not a desktop driver
@@ -179,6 +193,9 @@ func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func()
 		fyne.NewMenuItem("Light Theme", func() { fyne.Do(func() { setLightTheme(a) }) }),
 		fyne.NewMenuItem("Dark Theme", func() { fyne.Do(func() { setDarkTheme(a) }) }),
 		fyne.NewMenuItem("System Theme", func() { fyne.Do(func() { setSystemTheme(a) }) }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Resource Details", func() { fyne.Do(func() { showResourceDetail(resCPU) }) }),
+		fyne.NewMenuItem("System Info", func() { fyne.Do(func() { showSystemInfo(a) }) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Help", func() { fyne.Do(func() { showHelp(a) }) }),
 		fyne.NewMenuItem("Check for Updates", func() { checkForUpdatesManual(a) }),

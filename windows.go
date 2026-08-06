@@ -20,6 +20,12 @@ func hideAllWindows(win fyne.Window) {
 	if updateWindow != nil && updateOpen {
 		updateWindow.Hide()
 	}
+	if sysInfoWindow != nil && sysInfoOpen {
+		sysInfoWindow.Hide()
+	}
+	if resourceDetailWindow != nil && resourceDetailOpen {
+		resourceDetailWindow.Hide()
+	}
 }
 
 // showAllWindows reveals the main window plus whichever secondary windows
@@ -35,6 +41,12 @@ func showAllWindows(win fyne.Window) {
 	}
 	if updateWindow != nil && updateOpen {
 		updateWindow.Show()
+	}
+	if sysInfoWindow != nil && sysInfoOpen {
+		sysInfoWindow.Show()
+	}
+	if resourceDetailWindow != nil && resourceDetailOpen {
+		resourceDetailWindow.Show()
 	}
 }
 

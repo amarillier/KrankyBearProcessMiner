@@ -53,18 +53,42 @@ alongside each graph.
 
 PROCESS TABLE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• PID, Name, PPID, User, CPU%, Mem% — click a column header to sort by
-  it, click again to reverse. Drag a column boundary to resize it.
+• PID, Name, PPID, User, CPU%, Mem%, Disk R, Disk W, Private — click a
+  column header to sort by it, click again to reverse. Drag a column
+  boundary to resize it.
+• Disk R/W show live per-process read/write KB/s. Private shows real
+  Private Bytes on Windows, an RSS-minus-shared-pages approximation on
+  Linux, and N/A on macOS (the closest available figure there is reserved
+  virtual address space, not real private memory — showing it would be
+  misleading rather than just incomplete). Either column reads N/A for a
+  process owned by another user/system account, same as any other
+  permission-restricted field.
 • Long process names are ellipsized (…) to fit the Name column instead of
   overflowing into whatever's next to it.
 • Filter by name (top-left box), and/or narrow the list to actual resource
   hogs with the "Top CPU" / "Top Mem" selects (Off / ≥1% / ≥5% / ≥10% /
   ≥25%, independently adjustable) — a combination not offered out of the
   box by any of the platform-native tools this app draws on.
+• "Regex" checkbox switches the name filter from a plain substring match
+  to a real regexp match — e.g. ^(?i)(process|activity).* to compare just
+  this app's own processes against Activity Monitor's, with nothing else
+  cluttering the list. An invalid or still-being-typed regex shows every
+  row rather than going blank or erroring.
 • "Refresh every" adjusts the process-list sample interval (1s/2s/5s/10s);
   "Refresh Now" forces an immediate resample.
 • Select a row and click "End Process" to terminate it, after a
   confirmation dialog.
+
+PARENT PROCESSES VIEW:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"Parent processes only" declutters the table down to processes worth
+drilling into: anything with at least one child (e.g. a browser with a
+dozen helper processes), plus anything with no visible parent of its own.
+A childless process whose parent IS shown is hidden here, not gone — it's
+one click away. Click a parent row to open (or update) a single read-only
+"Children" window listing its direct children with live CPU%/Mem%; only
+one such window is ever open, and clicking a different parent swaps its
+contents into it rather than opening another.
 
 DETAIL PANE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -79,6 +103,36 @@ Drag the divider between the process table and the detail pane, and the
 one between the detail info and its children list, to trade space between
 them. Both positions persist across launches, alongside the main window
 size.
+
+RESOURCE DETAILS WINDOW:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Click any top-strip mini graph (CPU/Memory/Disk/Network), or use the View
+menu / system tray ("Resource Details"), to open a bigger, clearer view of
+just one resource at a time, Task Manager-style: a resizable list to switch
+between the four, one large graph for whichever is selected. All four keep
+recording history in the background even while not the one shown, so
+switching between them never shows a blank graph. The big graph shows
+value-axis gridlines (%/KB/s) and a time axis (elapsed time back from
+"now") so peaks and the visible time span are actually readable.
+Below the resource list, a Top Consumers panel shows the processes
+actually driving CPU, Memory, or Disk — name plus just that one metric —
+filtered by an adjustable threshold (Off / ≥1% / ≥5% / ≥10% / ≥25% for
+CPU/Mem; KB/s tiers for Disk), capped at 8 rows. Not available for
+Network — there's no per-process network API to draw from.
+
+SYSTEM INFO WINDOW:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+View menu / system tray ("System Info") shows a point-in-time summary:
+computer name and OS/platform/version/architecture, CPU model/cores/
+logical processors/speed, total memory, mounted disk volumes with size,
+and network adapters with type (wired/wireless), connected status, and
+WiFi signal strength where applicable. Adapter type is a name-pattern
+heuristic, not guaranteed accurate for unusual adapter names. Disk volumes
+are mounted filesystems, not raw physical disks. "Copy to Clipboard" grabs
+the whole summary as plain text. The window opens right away with a
+"Collecting…" message while gathering runs in the background — on macOS
+this can take 10+ seconds (WiFi signal strength there needs a slow system
+tool), so the delay is expected, not a hang.
 
 WINDOW MANAGEMENT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -106,8 +160,11 @@ KEYBOARD SHORTCUTS:
 
 KNOWN LIMITATIONS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• No per-process disk I/O on macOS, and no per-process network usage on
-  any platform yet — the Top CPU/Mem filter is scoped accordingly for now.
+• No per-process network usage or GPU usage on any platform yet — no
+  platform offers a simple API for either (Windows' own Task Manager
+  relies on ETW tracing for per-process network) — the Top CPU/Mem filter
+  is scoped accordingly for now.
+• No real "Private" memory figure on macOS (see PROCESS TABLE above).
 • End Process is a hard kill; no graceful-terminate or elevation flow yet.
 • Column widths aren't remembered across launches (only the split-pane
   divider positions and window size are) — Fyne's table widget has no way

@@ -17,13 +17,21 @@ var (
 )
 
 // newSystemGraphsView builds the top strip of live CPU/Memory/Disk/Network
-// graphs. The returned update func must only be called from the main
-// goroutine (i.e. from inside fyne.Do) since it calls Sparkline.Push.
-func newSystemGraphsView() (view fyne.CanvasObject, update func(SystemSnapshot)) {
-	cpuGraph := NewSparkline(graphColorCPU, scaleFixed0to100)
-	memGraph := NewSparkline(graphColorMem, scaleFixed0to100)
-	diskGraph := NewSparkline(graphColorDisk, scaleAuto)
-	netGraph := NewSparkline(graphColorNet, scaleAuto)
+// graphs. onTap is called when the user clicks a mini graph, to open the
+// bigger single-resource view (see resourceview.go's Resource Details
+// window) already showing that resource. The returned update func must only
+// be called from the main goroutine (i.e. from inside fyne.Do) since it
+// calls Sparkline.Push.
+func newSystemGraphsView(onTap func(resourceKind)) (view fyne.CanvasObject, update func(SystemSnapshot)) {
+	cpuGraph := NewSparkline(graphColorCPU, scaleFixed0to100, sparklineHistoryLen)
+	memGraph := NewSparkline(graphColorMem, scaleFixed0to100, sparklineHistoryLen)
+	diskGraph := NewSparkline(graphColorDisk, scaleAuto, sparklineHistoryLen)
+	netGraph := NewSparkline(graphColorNet, scaleAuto, sparklineHistoryLen)
+
+	cpuGraph.OnTapped = func() { onTap(resCPU) }
+	memGraph.OnTapped = func() { onTap(resMem) }
+	diskGraph.OnTapped = func() { onTap(resDisk) }
+	netGraph.OnTapped = func() { onTap(resNet) }
 
 	cpuLabel := widget.NewLabel("CPU: --")
 	memLabel := widget.NewLabel("Memory: --")
