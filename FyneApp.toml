@@ -2,7 +2,7 @@
 ID = "com.github.amarillier.KrankyBearProcessMiner"
 Name = "KrankyBear ProcessMiner"
 Creator = "Allan Marillier"
-  Version = "0.2.0"
+  Version = "0.3.0"
 Build = 2
 Icon = "KrankyBearProcessMiner.png"
 

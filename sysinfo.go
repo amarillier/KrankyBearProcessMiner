@@ -9,6 +9,9 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
+	fynetooltip "github.com/dweymouth/fyne-tooltip"
+	ttwidget "github.com/dweymouth/fyne-tooltip/widget"
+
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
@@ -131,7 +134,7 @@ func showSystemInfo(a fyne.App) {
 		})
 	}
 
-	sysInfoWindow.SetContent(container.NewPadded(sysInfoLoadingContent()))
+	sysInfoWindow.SetContent(fynetooltip.AddWindowToolTipLayer(container.NewPadded(sysInfoLoadingContent()), sysInfoWindow.Canvas()))
 	sysInfoWindow.Resize(fyne.NewSize(460, 200))
 	sysInfoOpen = true
 	sysInfoWindow.Show()
@@ -180,8 +183,8 @@ func renderSystemInfo(win fyne.Window, info SystemInfo) {
 	memLabel := widget.NewLabel(formatBytes(info.MemTotal) + " total")
 
 	const copyLabel = "Copy to Clipboard"
-	var copyBtn *widget.Button
-	copyBtn = widget.NewButton(copyLabel, func() {
+	var copyBtn *ttwidget.Button
+	copyBtn = ttwidget.NewButton(copyLabel, func() {
 		win.Clipboard().SetContent(formatSystemInfoText(info))
 		// Clicking a button gives no other feedback that anything happened,
 		// so flip the label to confirm the copy actually worked, then
@@ -199,6 +202,7 @@ func renderSystemInfo(win fyne.Window, info SystemInfo) {
 			})
 		})
 	})
+	copyBtn.SetToolTip("Copy this whole summary as plain text -- handy for a bug report or comparing against another machine")
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Computer", fyne.TextAlignLeading, bold),
@@ -220,7 +224,7 @@ func renderSystemInfo(win fyne.Window, info SystemInfo) {
 	scroll := container.NewVScroll(content)
 	scroll.SetMinSize(fyne.NewSize(420, 420))
 
-	win.SetContent(container.NewBorder(nil, container.NewPadded(copyBtn), nil, nil, container.NewPadded(scroll)))
+	win.SetContent(fynetooltip.AddWindowToolTipLayer(container.NewBorder(nil, container.NewPadded(copyBtn), nil, nil, container.NewPadded(scroll)), win.Canvas()))
 	win.Resize(fyne.NewSize(460, 560))
 }
 

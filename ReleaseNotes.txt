@@ -2,15 +2,344 @@ Release notes
 KrankyBear ProcessMiner -- cross-platform (Windows, Linux, macOS) process/system monitor
 
 Future ideas:
-(none right now)
+- Persist watched processes/directories in Preferences across launches, with a reactivation flow at startup (see/choose to reactivate, edit, or leave disabled). Bigger than it first looks: PIDs aren't meaningful across a restart, so a process watch would need to persist by *name* (or exe path) instead and re-match against whatever's actually running next launch -- straightforward for directory watches (just the path), needs real design for process watches (what if two processes share a name? what if it never comes back?). The auto-open/focus half of this same idea shipped already (see 0.3.0 below); this is just the persistence/reactivation half.
+
+- Options to show number of file handles and other similar information, but only if it is useful in perf troubleshooting?
+
+- Authenticode/code-signing check (moderate) — flag unsigned or oddly-signed executables. Windows-first (Crypto API), same trust-but-verify use case, different angle (unauthorized/malicious binary, not AV behavior).
+
+- ETW-based work (bigger investment, biggest payoff) — this is the one I'd actually prioritize if you want the next big leap: consuming Event Tracing for Windows unlocks three things this app already documents as gaps in one shot — real per-process network usage, real per-process I/O latency (not just throughput), and the minifilter file-scan interference detection I flagged as missing last time. It's a materially bigger piece of plumbing than anything shipped so far, but it's the same investment that pays for all three rather than three separate efforts.
+
 
 Some day maybe, maybe never - defer for now
 - Network user per process - unlikely since gopsutil does not have access to this.
 - GPU resource use - Windows only since not readily available for Mac/Linux, maybe some day if we perceive value
 - Process CPU affinity / priority controls -- scrapped rather than deferred: affinity has no real macOS support at all (Apple's affinity API is advisory-only, a non-starter on Apple Silicon), and priority is a rare power-user action for most people. Not worth the cross-platform inconsistency for the value.
-- Sort/filter/End Process in the Parent-processes view's children drill-down window, once the current read-only version has proven useful
-- Aggregate CPU%/Mem% across a parent + all its descendants in the Parent-processes view (Task Manager-style grouped totals), instead of showing just the parent row's own usage
-- Single-instance enforcement (launching a second copy brings the running one to the foreground and exits instead) -- bigger lift than the others here, needs real cross-process IPC plus platform-specific window activation, not just "is it already running" detection. Alternative - simply detect a current process, open a window indicating that with an option to close - don't actually bring the other to the foreground should be much simpler.
+- ntdll.dll hook-byte comparison (on-disk vs in-memory at known Nt* API entry points) + unbacked-executable-memory-region scan, Windows only -- the actual "prove an AV/EDR hook or malware patched something" signal, bigger than the thread-list-with-start-address-resolution shipped in 0.3.0. Revisit once that's proven useful in practice.
+- Per-process file handle enumeration -- Windows needs undocumented NtQuerySystemInformation(SystemHandleInformation)/NtQueryObject techniques (harder than the thread-list work, no clean equivalent to NtQuerySystemInformation(SystemProcessInformation)'s already-resolved start addresses); Linux is straightforward via /proc/[pid]/fd; macOS has no comparable API for arbitrary processes without root+entitlements.
+- Synchronous file-scan interference detection (the *other* common meaning of "AV interference" -- a minifilter driver intercepting file I/O and scanning it before letting the open complete, adding latency to the target process while the AV's own process burns CPU) -- Interference Watch (0.3.0) only covers things happening *inside* the watched process itself (an unbacked thread, a newly-loaded module), not this. Would need ETW consumption and correlating I/O latency against the AV process, a materially different and bigger mechanism than either signal shipped so far.
+
+Version 0.3.0 - August 07, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW Thread inspection ("Show Threads" button, Windows-first)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Select a process and click "Show Threads" for a one-off snapshot of its
+  threads. On Windows: TID, state, kernel/user CPU time, and each thread's
+  start address resolved to "module.dll+0xOFFSET" -- or flagged "UNBACKED
+  (possible injection)" when the address falls outside every one of the
+  process's own loaded modules. That's the classic signal for reflective
+  DLL injection or shellcode (the same technique Process Explorer/Process
+  Hacker-style tools use), and the main practical ask behind this feature:
+  verifying a customer's AV/security exclusions are actually configured
+  as claimed, not just trusting that they are.
+- This detects code *injected* into a process. It does NOT (yet) detect an
+  AV/EDR *hook* patched into an otherwise-legitimate module like ntdll.dll
+  -- that needs comparing in-memory bytes against the on-disk DLL at known
+  API entry points, a separate, bigger piece of work noted in "Some day
+  maybe" below.
+- Windows implementation: NtQuerySystemInformation(SystemProcessInformation)
+  for the thread list (thread start addresses aren't available via the
+  simpler Toolhelp API), cross-referenced against the process's loaded
+  modules via the classic Toolhelp module snapshot. Verified for real on
+  Windows via SSH during development, not just compiled: a standalone test
+  program confirmed thread states, start addresses, and module address
+  ranges all resolve correctly against a real running process (including
+  a documented NT quirk where the actively-querying thread's own start
+  address reports as 0 -- handled as "unresolved", not misflagged as
+  "UNBACKED").
+- macOS/Linux: just a thread count for now. Resolving start addresses
+  needs reading another process's memory, which needs an entitlement
+  Apple doesn't grant ordinary third-party apps on macOS (SIP blocks
+  task_for_pid), or root/CAP_SYS_PTRACE on Linux (Yama's ptrace_scope
+  blocks it otherwise) -- a real platform gap, not something to code
+  around. Best-effort, matching this app's general philosophy of being
+  honest about what each OS actually allows rather than faking parity.
+
+✨ NEW Interference Watch (continuous, on top of Thread Inspection)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Thread Inspection above is a one-off snapshot; this makes the same
+  detection continuous and a lot more approachable for someone who isn't a
+  Windows internals expert. Select a process and click "Watch for
+  Interference" (next to "Show Threads"), or watch a whole directory --
+  any process launched from it is covered automatically without
+  reselecting it every time it restarts.
+- Every process-list sample, each watched process is re-checked; a newly
+  appearing UNBACKED thread (one that wasn't there the first time this
+  process was checked) is logged as an event -- process, time, TID, start
+  address -- and flags a "⚠" on that row in the main table. A thread that
+  was already unbacked *before* watching started is recorded as the
+  baseline and not reported, so watching an unusual-but-legitimate process
+  doesn't cry wolf on the first check.
+- Deliberately opt-in, not "watch everything": scanning every process this
+  way would mean a Toolhelp32 module snapshot per process on top of the
+  shared system-wide thread query every cycle -- fine for a handful of
+  watched targets, not hundreds. Matches the actual ask: verify specific
+  exclusions, not replace the AV.
+- "Check for Interference" (View/Process menu, tray) opens the
+  Interference Watch window: what's currently watched (with Remove), an
+  "Add Directory to Watch…" picker, and the interference event log with
+  Copy to Clipboard / Clear. Included in Hide All / Show All like every
+  other secondary window.
+- The one syscall NtQuerySystemInformation(SystemProcessInformation)
+  already returns the whole system's thread list regardless of how many
+  processes are being checked against it, so watching 1 target or 20 costs
+  the same one call per cycle -- no repeat of this app's own earlier
+  Status()-forks-ps-per-call mistake, just against a different call.
+  Directory matching resolves each process's on-disk executable path
+  (gopsutil's Exe()) once per PID and caches it, rather than re-resolving
+  it for every running process on every tick.
+- Windows-only, same constraint as the thread inspection it's built on --
+  the watch list can still be built on macOS/Linux, but nothing is ever
+  flagged there (the button and the window's "Add Directory" say so
+  directly rather than silently doing nothing).
+- Does NOT detect the *other* common meaning of "AV interference" --
+  synchronous file-scan latency from a minifilter driver intercepting file
+  I/O, which shows up as slow I/O on the target process while the AV's own
+  process burns CPU, not as anything inside the target's own threads. That
+  needs a different, ETW-based mechanism; not implemented here.
+
+✨ NEW Interference Watch: second detection signal, new module loaded
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The UNBACKED-thread signal above catches *reflective* injection (raw
+  shellcode, no module ever loaded) -- malware's usual technique for
+  staying off the module list. It deliberately does NOT catch legitimate
+  AV/EDR hooking, which almost always uses ordinary LoadLibrary-based DLL
+  injection instead, specifically because it *wants* its DLL visible, not
+  hidden. Confirmed by live testing on a real Chrome process: a
+  CreateRemoteThread-based shellcode stub read back with a generic,
+  unresolvable start address in *both* ProcessMiner and Process Explorer
+  (neither tool flagged it), while a LoadLibraryW-based DLL injection --
+  the more realistic stand-in for how a real hook actually behaves --
+  showed up cleanly via this new signal.
+- Same watch list, same baseline/"newly appeared since watching started"
+  semantics as the thread signal: a module already loaded before you
+  started watching is the baseline, not reported. Logged as its own event
+  ("new module loaded: <name>"), and flags the same "⚠" in the main table.
+- Costs a second Toolhelp32 module snapshot per watched target per cycle
+  (separate from the one the thread signal already takes internally) --
+  simplicity over micro-optimization, still bounded by the watch-list
+  size, not the system-wide process count.
+- Two real bugs found and fixed via this live testing, both now verified
+  against a real injected module on a real Chrome process:
+  - The "⚠" indicator only stayed lit for the one sample tick a new module
+    was first detected, then went dark even though the module -- and the
+    interference it represents -- was still loaded. Now stays flagged for
+    as long as the condition persists, matching the thread signal.
+  - The new-module check was silently skipped whenever the *separate,
+    unrelated* system-wide thread-list query failed on a given cycle, even
+    though it doesn't use that data at all. Two consecutive live
+    DLL-injection tests went undetected before this was caught -- fixed by
+    no longer gating one detection path on the other's success.
+- Also fixed: the Parent-processes children drill-down window's own "⚠"
+  column wasn't wired to the flagged-PID state at all, so a recycled table
+  cell could show stale leftover text from whatever column it last
+  rendered (spotted via a screenshot showing PID/CPU/Private values
+  bleeding into the "⚠" column).
+
+✨ NEW Interference Watch: third detection signal, thread stack scan
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Prompted by a real customer story: a Windows performance expert on the
+  team caught a security team's undisclosed removal of required exclusions
+  live, in front of the customer, by having them watch Process Explorer and
+  scroll through threads and stacks -- "thread stacking," watching live
+  call stacks for a security vendor's own code sitting in the call path.
+  This is a coarse, address-scanning approximation of that technique: for
+  each of a watched process's threads, reads the thread's entire committed
+  stack region (via its TEB's StackBase/StackLimit -- no thread suspension
+  needed, unlike reading live register state would require) and checks
+  every pointer-aligned value against the process's loaded-module address
+  ranges. A hit against a module that isn't part of Windows itself or the
+  process's own files is reported.
+- Deliberately reads the *whole* stack region, not just current call
+  frames: a function that already returned doesn't clear the stack bytes
+  it used, so this can still find evidence of a hook that ran and returned
+  before the scan happened -- the same "recent history, not just this
+  instant" property that lets a human watching stacks scroll by over time
+  catch things a single live snapshot would miss, approximated here from
+  one point-in-time read.
+- Unlike the other two signals, this one has NO baseline: a hit is reported
+  the first time it's ever seen for a watched process, even on the very
+  first check, specifically because the point is finding evidence of
+  something that may already have been happening before you started
+  watching (the real customer case: exclusions had already been silently
+  removed well before anyone looked). The "⚠" stays lit for as long as the
+  module remains loaded, same persistence behavior as the new-module
+  signal.
+- A short, explicitly best-effort, user-extensible list of known AV/EDR
+  module-name fragments (McAfee/Trellix, Symantec/Broadcom SEP, CrowdStrike
+  Falcon, SentinelOne, VMware Carbon Black, Sophos, Trend Micro, Cylance,
+  Palo Alto Cortex XDR) attaches a friendly vendor label when a hit
+  matches -- an unmatched hit is still reported as an "unrecognized
+  third-party module," not silently dropped, since the list is inherently
+  incomplete (vendors rename/version/sometimes randomize module names) and
+  an unlabeled hit is still worth investigating.
+- This is a pointer-address scan, not true call-stack unwinding (what
+  Process Explorer's own "Stack" button does) -- cruder, no call-frame
+  structure, but far simpler, and answers the question that actually
+  matters: is this vendor's code anywhere near this thread. Framed
+  throughout the UI as "worth confirming with Process Explorer/Procmon,"
+  not proof on its own.
+- THREAD_BASIC_INFORMATION/TEB struct layout verified empirically against
+  a real running process before shipping (same standard as the earlier
+  SYSTEM_THREAD_INFORMATION work): TebBaseAddress resolved to a real
+  address, and its UniqueProcess/UniqueThread fields matched the queried
+  PID/TID exactly, confirming the field offsets.
+- Windows-only, same constraint as the other two signals.
+- Note from real testing: expect some genuinely benign "new module loaded"
+  events alongside real findings -- large apps like Chrome delay-load
+  Windows OS components on demand well after startup (e.g.
+  Windows.Devices.Bluetooth.dll/BthRadioMedia.dll appearing the moment a
+  Bluetooth-related API actually gets touched), not just at launch. Normal
+  behavior, not a false detection -- the event log's real value is exactly
+  this: building a sense of what's ordinary noise for a given process
+  versus what's worth a closer look via the stack scan.
+
+✨ NEW Notable column: AV/EDR recognition + process-masquerading heuristic
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Two quick wins pulled off the "Future ideas" backlog. New "Notable"
+  column in the main table (and the Parent-processes children window):
+  "🛡 <vendor>" when a process name matches the same best-effort
+  known-security-vendor list Interference Watch's stack scan already uses
+  (now extended with a few more consumer/enterprise names -- Microsoft
+  Defender, Malwarebytes, ESET, Kaspersky, Bitdefender), or "🎭 not launched
+  by <expected>" for the small set of well-known Windows process names with
+  a stable, version-independent expected parent.
+- Deliberately conservative on the masquerade side, to avoid the tool
+  crying wolf: only svchost.exe/services.exe and lsass.exe/wininit.exe are
+  checked. csrss.exe was considered and excluded on purpose -- its real
+  parent (smss.exe) exits immediately after creating it, so a naive check
+  there would misfire constantly, which would undermine trust in every
+  other signal this app reports.
+- Both are informational/investigative, not proof: a real security
+  product's name match is just a helpful label (a real gap for anyone who
+  isn't already familiar with what to look for), and a masquerade mismatch
+  is "worth a second look," since an unusual but entirely legitimate launch
+  path can also trigger it.
+- Blank for the overwhelming majority of rows -- this isn't meant to be a
+  busy column.
+
+✨ NEW Memory column (actual RSS bytes, not just Mem%)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Mem% alone doesn't say how much memory that actually *is* without doing
+  the math against total system RAM yourself. New "Memory" column (between
+  Mem% and Disk R) shows the real figure -- RSS (Resident Set Size), the
+  same value Mem% is already computed from, so this was near-zero-cost to
+  add: the raw byte count was already being sampled every tick, just never
+  surfaced. Works identically on all three platforms (unlike Private,
+  which has real per-OS gaps).
+- In the Parent-processes view, Memory shows the same combined
+  parent-plus-every-descendant total that Mem%/CPU% already do, not just
+  the parent row's own usage -- consistent with how that view's grouped
+  totals already work.
+
+✨ NEW Interference Watch: auto-open on watch + at-a-glance severity icons
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Clicking "Watch for Interference" now opens (or brings to focus) the
+  Interference Watch window itself, instead of leaving you to separately
+  discover the View/Process menu or tray's "Check for Interference." Only
+  on *adding* a watch, not removing one.
+- Each watched process in the "Watched Targets" list now shows an
+  at-a-glance status: "✓" (nothing ever logged against it), "⚠" (everything
+  logged so far matched the known-vendor list -- attributable, still worth
+  attention but less alarming), or "🛑" (something unrecognized was found --
+  the case that most needs a closer look). Individual events in the log get
+  the same icon for the same reason, in both the on-screen list and the
+  Copy to Clipboard text. A display hint from a best-effort name match, not
+  a certified verdict. Directory watches don't get a status icon --
+  attributing a directory's *historical* events back to it reliably isn't
+  worth the complexity for a glance indicator, so those stay a plain
+  listing.
+
+✨ FIXED Children drill-down window stealing focus / reopening itself
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- With "Parent processes only" checked and a parent selected, the children
+  window would pop itself back to the front (and try to take focus) on
+  every single sample tick -- even seconds after being closed by hand.
+  Root cause: the main table re-selects the already-selected row on every
+  refresh purely to keep it visually highlighted across the data update,
+  but Fyne's Table.Select() unconditionally fires OnSelected even when the
+  selection didn't actually change, and the selection handler unconditionally
+  reopened/refocused the children window whenever parents-only was on.
+  Confirmed via testing to be unrelated to Interference Watch specifically
+  (reproduced with no watch active at all) -- purely a "Parent processes
+  only" + selection issue. Fixed by only reopening/refocusing on a genuine
+  click, not a periodic re-select that's just preserving the highlight.
+
+✨ IMPROVED Thread inspection: column headers, matching the main table
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- "Show Threads" now renders as an aligned table with a header row (TID,
+  State, Start Address, Kernel Time, User Time) instead of one free-form
+  text line per row -- the field order wasn't obvious to someone who
+  hasn't been following this feature's development, and Process
+  Explorer's own equivalent view has real columns.
+
+✨ FIXED Silent module-list resolution failures against busy processes
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Every thread's start address showed "N/A" for real, many-threaded
+  processes like a live Chrome browser process (48+ threads) -- and
+  nothing indicated anything had gone wrong. Root cause: the Toolhelp32
+  module snapshot can fail with the well-documented, genuinely transient
+  ERROR_PARTIAL_COPY against a busy process, and the previous code only
+  checked for the snapshot handle itself failing to open, silently
+  swallowing a failed enumeration into an empty-but-successful-looking
+  result. Fixed with a bounded retry, and a distinct "couldn't verify this
+  time" state (a banner in the Threads window, and a skip rather than a
+  false-clean in Interference Watch) instead of treating a failed check as
+  a clean one.
+- Also added a per-thread NtQueryInformationThread fallback for the rarer
+  case where the bulk thread-list API reads a thread's start address as
+  exactly 0 (confirmed this happens for a process's own first thread, and
+  can happen elsewhere too) -- Process Explorer/Process Hacker's own
+  technique for the same gap.
+
+✨ NEW Tooltips throughout the app
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Hover any column header, button, checkbox, or select to see what it does
+  -- prompted directly by the new "⚠" Interference Watch column, whose
+  purpose isn't obvious from the glyph alone to someone who hasn't been
+  following this feature's development.
+- Fyne itself has no built-in tooltip support yet (its own changelog says
+  so explicitly). Uses github.com/dweymouth/fyne-tooltip, the same
+  drop-in package already proven in KrankyBearCommander -- ttwidget.Button/
+  Check/Select as drop-in replacements for the equivalent core Fyne
+  widgets, plus AddWindowToolTipLayer/DestroyWindowToolTipLayer wired into
+  every window (main, children drill-down, Interference Watch, System
+  Info, Resource Details).
+
+✨ NEW Grouped CPU%/Mem% totals in the Parent-processes view
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Each parent row now shows the combined CPU%/Mem% across itself and every
+  descendant (children, grandchildren, ...) it's standing in for, Task
+  Manager-style, instead of just its own usage. The "Top CPU"/"Top Mem"
+  threshold filter, when also on, filters against this combined figure so
+  it matches what's actually displayed. The children drill-down window
+  still shows each child's own individual figures -- the whole point of
+  opening it is seeing the breakdown the parent row is summarizing.
+
+✨ NEW Sort/filter/End Process in the children drill-down window
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The Parent-processes view's children window has graduated from a
+  read-only list to the same sortable columns (click a header, click again
+  to reverse), a name filter, and End Process (with the same confirmation
+  dialog) as the main table -- now that the simpler version has proven the
+  overall approach is worth having.
+- Switching to a different parent resets the filter and selection (an old
+  filter usually doesn't apply to a different parent's children), but
+  keeps whatever sort column/direction was already chosen, same as the
+  main table keeps its sort across data changes.
+
+✨ NEW Single-instance enforcement
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Launching a second copy now shows a small "already running" window with
+  a Quit button instead of opening a second full instance. Deliberately
+  simple, per feedback: no cross-process IPC, no bringing the first
+  instance's window to the foreground -- just close the new one.
+- Detects another instance by comparing executable *path* (not name)
+  against every other running process, via gopsutil -- avoids mistaking
+  an unrelated process that happens to share a generic name. Excludes this
+  process's own parent PID specifically so the Mesa3D Windows fallback's
+  self-relaunch (see internal/startup) can't misdetect its own prior,
+  mid-exit instance as a second real one.
 
 Version 0.2.0 - August 06, 2026
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

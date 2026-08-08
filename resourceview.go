@@ -8,6 +8,9 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
+
+	fynetooltip "github.com/dweymouth/fyne-tooltip"
+	ttwidget "github.com/dweymouth/fyne-tooltip/widget"
 )
 
 // resourceKind identifies one of the four top-strip resources, shared by
@@ -92,7 +95,7 @@ type resourceDetailState struct {
 	topThreshold        [4]float64
 	topRows             []topProcRow
 	topHeader           *widget.Label
-	topThresholdSelect  *widget.Select
+	topThresholdSelect  *ttwidget.Select
 	topList             *widget.List
 	topNormalGroup      *fyne.Container
 	topUnavailableLabel *widget.Label
@@ -202,7 +205,7 @@ func (st *resourceDetailState) buildWindow() {
 	split := container.NewHSplit(leftPane, rightPane)
 	split.SetOffset(0.3)
 
-	st.win.SetContent(split)
+	st.win.SetContent(fynetooltip.AddWindowToolTipLayer(split, st.win.Canvas()))
 	st.win.Resize(fyne.NewSize(820, 500))
 
 	st.win.SetCloseIntercept(func() {
@@ -219,7 +222,7 @@ func (st *resourceDetailState) buildWindow() {
 func (st *resourceDetailState) buildTopProcessesArea() fyne.CanvasObject {
 	st.topHeader = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	st.topThresholdSelect = widget.NewSelect(nil, func(sel string) {
+	st.topThresholdSelect = ttwidget.NewSelect(nil, func(sel string) {
 		if st.selected == resDisk {
 			st.topThreshold[resDisk] = diskThresholdValues[sel]
 		} else {
@@ -227,6 +230,7 @@ func (st *resourceDetailState) buildTopProcessesArea() fyne.CanvasObject {
 		}
 		st.refreshTopProcesses()
 	})
+	st.topThresholdSelect.SetToolTip("Hide processes below this threshold in the list below")
 
 	st.topList = widget.NewList(
 		func() int { return len(st.topRows) },

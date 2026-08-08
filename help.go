@@ -53,9 +53,13 @@ alongside each graph.
 
 PROCESS TABLE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• PID, Name, PPID, User, CPU%, Mem%, Disk R, Disk W, Private — click a
-  column header to sort by it, click again to reverse. Drag a column
-  boundary to resize it.
+• PID, Name, PPID, User, CPU%, Mem%, Memory, Disk R, Disk W, Private —
+  click a column header to sort by it, click again to reverse. Drag a
+  column boundary to resize it.
+• Memory shows actual physical memory in use (RSS -- Resident Set Size),
+  the same figure Mem% is computed from, on all three platforms. In the
+  Parent-processes view, both Mem% and Memory show the combined total
+  across the parent and every descendant, same as CPU%.
 • Disk R/W show live per-process read/write KB/s. Private shows real
   Private Bytes on Windows, an RSS-minus-shared-pages approximation on
   Linux, and N/A on macOS (the closest available figure there is reserved
@@ -65,6 +69,14 @@ PROCESS TABLE:
   permission-restricted field.
 • Long process names are ellipsized (…) to fit the Name column instead of
   overflowing into whatever's next to it.
+• Notable column (Windows): "🛡 <vendor>" for a process recognized as
+  security software (a small, best-effort name-fragment list -- see
+  Interference Watch below), or "🎭 not launched by <expected>" for the
+  small set of well-known Windows process names with a stable expected
+  parent (currently svchost.exe/services.exe and lsass.exe/wininit.exe) --
+  a mismatch is the classic malware-hides-as-a-system-process trick, worth
+  a second look, though an unusual but legitimate launch path could also
+  cause it. Blank for the overwhelming majority of rows.
 • Filter by name (top-left box), and/or narrow the list to actual resource
   hogs with the "Top CPU" / "Top Mem" selects (Off / ≥1% / ≥5% / ≥10% /
   ≥25%, independently adjustable) — a combination not offered out of the
@@ -85,10 +97,16 @@ PARENT PROCESSES VIEW:
 drilling into: anything with at least one child (e.g. a browser with a
 dozen helper processes), plus anything with no visible parent of its own.
 A childless process whose parent IS shown is hidden here, not gone — it's
-one click away. Click a parent row to open (or update) a single read-only
-"Children" window listing its direct children with live CPU%/Mem%; only
-one such window is ever open, and clicking a different parent swaps its
-contents into it rather than opening another.
+one click away. Click a parent row to open (or update) a single "Children"
+window listing its direct children — sortable columns, a name filter, and
+End Process, same as the main table; only one such window is ever open,
+and clicking a different parent swaps its contents into it rather than
+opening another (resetting the filter/selection, but keeping whatever sort
+was already chosen).
+Each parent row's CPU%/Mem% is the combined total across it and every
+descendant it's standing in for (Task Manager-style), not just its own
+usage — the children window still shows each child's own individual
+figures, which is the point of opening it.
 
 DETAIL PANE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -96,6 +114,87 @@ Selecting a process shows its user, live status, start time, full command
 line, ancestry (parent chain), and a scrollable list of child processes.
 Click a child to jump straight to it in the main table — the name filter
 clears automatically first if it would otherwise hide that child.
+
+THREAD INSPECTION:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Select a process and click "Show Threads" for a one-off snapshot (not a
+live view — thread lists change fast). On Windows: TID, state, kernel/user
+CPU time, and each thread's start address resolved to
+"module.dll+0xOFFSET" — or "UNBACKED (possible injection)" if the address
+falls outside every one of the process's own loaded modules, the classic
+sign of code injection (reflective DLL injection, shellcode). Useful for
+verifying AV/security-software exclusions are actually configured, not
+just trusting that they are. This does NOT detect an AV/EDR-style *hook*
+patched into an otherwise-legitimate module (e.g. ntdll.dll) — only
+injected code running outside any loaded module. macOS/Linux show just a
+thread count for now: resolving start addresses needs reading another
+process's memory, which needs privileges/entitlements neither platform
+grants a normal third-party app the way Windows does.
+
+INTERFERENCE WATCH:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A more accessible, continuous layer on top of Thread Inspection above, for
+catching AV/security-software interference as it happens rather than
+one snapshot at a time. Select a process and click "Watch for Interference"
+(next to "Show Threads") to add it to the watch list — this also opens (or
+brings to focus) the Interference Watch window itself, so it's immediately
+clear where to look for results; the View/Process menu and tray's "Check
+for Interference" opens the same window any other time. It also lets you
+watch a whole directory — any process launched from it is watched
+automatically, without re-selecting it every time it restarts.
+Every process-list sample (same 1-10s interval as the main table), each
+watched process is checked for three signs of interference:
+• A thread with an "UNBACKED" start address that wasn't there the *first*
+  time it was checked — reflective injection (raw shellcode, no module
+  ever loaded), the technique malware uses specifically to stay off the
+  module list.
+• A new module (DLL) loading into the process that wasn't there when
+  watching started — the technique legitimate AV/EDR hooking actually
+  uses instead (it wants its DLL visible, not hidden), so this is what
+  catches a real security-vendor hook that the thread-based check won't.
+• A thread's stack memory containing a pointer into a module that isn't
+  part of Windows or the process's own files — a coarse approximation of
+  the classic "thread stacking" technique (manually watching live call
+  stacks for a security vendor's code in the call path). Unlike the two
+  signals above, this one is NOT relative to a baseline: it scans each
+  thread's entire stack region (not just current call frames), so it can
+  find evidence of a hook that was already there before you started
+  watching, on the very first check. This is a pointer-address scan, not
+  true call-stack unwinding, so treat a hit as worth confirming with
+  Process Explorer/Procmon, not proof on its own. If the module name
+  matches a short, best-effort known-vendor list, the event names the
+  likely vendor; otherwise it's reported as an unrecognized third-party
+  module — still worth investigating, just without a friendly label.
+For the first two signals, whatever was already present *before* you
+started watching is treated as the baseline, not reported, so watching an
+unusual-but-legitimate process doesn't immediately cry wolf. A "⚠" appears
+in the main table (and the Parent-processes children window) for any
+watched process currently showing any of the three signals, and stays lit
+for as long as the condition persists, not just the one moment it was
+first detected. The Interference Watch window's event log has Copy to
+Clipboard and Clear buttons.
+Each watched process in the "Watched Targets" list shows an at-a-glance
+status: "✓" if nothing has ever been logged against it, "⚠" if everything
+logged so far matched the known-vendor list (attributable, still worth
+attention but less alarming), or "🛑" if anything unrecognized was found
+(the case that most needs a closer look). Individual events in the log get
+the same "⚠"/"🛑" treatment for the same reason. This is a display hint
+based on a best-effort name match, not a certified verdict either way —
+directory watches don't get a status icon (attributing a directory's
+history back to it reliably isn't worth the added complexity for a glance
+indicator), just a plain listing.
+All three signals are Windows-only — on macOS/Linux the watch list can
+still be built but nothing will ever be flagged (the button and "Add
+Directory" say so).
+None of the three detects the *other* common meaning of "AV interference,"
+synchronous file-scan latency from a minifilter driver intercepting file
+I/O, which needs a different, ETW-based mechanism not implemented here.
+Expect some genuinely benign "new module loaded" events: browsers and other
+large apps delay-load Windows OS components on demand well after startup
+(e.g. Windows.Devices.Bluetooth.dll/BthRadioMedia.dll appearing the moment
+a Bluetooth or device-enumeration API actually gets touched) -- normal
+behavior, not evidence of anything. The event log helps you build a sense
+of what's normal for a given process versus what's worth a second look.
 
 RESIZABLE LAYOUT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -140,9 +239,14 @@ Hide All / Show All (Window menu or system tray) hides the main window and
 any open About/Help/Update windows together, then brings back exactly
 that same set later. Alt+H is a boss-key hotkey for Hide All — there's no
 matching Show hotkey by design; reveal via the Window menu or tray instead.
+Only one instance of this app runs at a time — launching a second copy
+shows a small "already running" window with a Quit button instead.
 
 SMART FEATURES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ Tooltips: hover any column header, button, checkbox, or select to see
+   what it does — including the "⚠" Interference Watch column, which isn't
+   obvious from the glyph alone.
 ✨ Theme Support: Light, Dark, or System theme (View menu).
 ✨ Lightweight sampling: the expensive-to-read fields (command line, start
    time, live status) are only fetched for whichever single process is

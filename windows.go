@@ -26,6 +26,9 @@ func hideAllWindows(win fyne.Window) {
 	if resourceDetailWindow != nil && resourceDetailOpen {
 		resourceDetailWindow.Hide()
 	}
+	if interferenceWindow != nil && interferenceOpen {
+		interferenceWindow.Hide()
+	}
 }
 
 // showAllWindows reveals the main window plus whichever secondary windows
@@ -47,6 +50,9 @@ func showAllWindows(win fyne.Window) {
 	}
 	if resourceDetailWindow != nil && resourceDetailOpen {
 		resourceDetailWindow.Show()
+	}
+	if interferenceWindow != nil && interferenceOpen {
+		interferenceWindow.Show()
 	}
 }
 

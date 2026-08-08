@@ -28,26 +28,66 @@ point. See **Lightweight by design** below.
   updated every second, with the current numeric values shown alongside each
   graph.
 - **Sortable, resizable process table** — PID, Name, PPID, User, CPU%, Mem%,
-  Disk R, Disk W, Private; click a header to sort, click again to reverse;
-  drag a column boundary to resize. Long process names are ellipsized to fit
-  the column instead of overflowing into the next one. Disk R/W show live
-  per-process read/write KB/s; Private shows real Private Bytes on Windows,
-  an RSS-minus-shared-pages approximation on Linux, and N/A on macOS (see
-  **Known limitations**). Either reads N/A for a process you don't own, same
-  as any other permission-restricted field.
+  Memory, Disk R, Disk W, Private, Notable; click a header to sort, click
+  again to reverse; drag a column boundary to resize. Long process names
+  are ellipsized to fit the column instead of overflowing into the next
+  one. Memory shows actual physical memory in use (RSS), the same figure
+  Mem% is computed from, on all three platforms — in the Parent-processes
+  view both show the combined total across the parent and every
+  descendant, same as CPU%. Disk R/W show live per-process read/write
+  KB/s; Private shows real
+  Private Bytes on Windows, an RSS-minus-shared-pages approximation on
+  Linux, and N/A on macOS (see **Known limitations**). Either reads N/A for
+  a process you don't own, same as any other permission-restricted field.
+  Notable (Windows) labels a row as recognized security software, or flags
+  a process-masquerading mismatch (e.g. a fake svchost.exe not actually
+  launched by services.exe) — blank for the overwhelming majority of rows.
 - **Detail pane** for the selected process — user, live status, start time,
   full command line, ancestry (parent chain), and a scrollable list of child
   processes. Click a child to jump straight to it in the main table (clearing
   the name filter first if needed so it's not hidden). Only the selected
   process's detail is fetched on demand — see **Lightweight by design**.
+- **Thread inspection** ("Show Threads") — a one-off snapshot of a process's
+  threads. On Windows: TID, state, CPU time, and each thread's start address
+  resolved against the process's own loaded modules — flagged "UNBACKED
+  (possible injection)" if it falls outside all of them, the classic sign of
+  code injection. Useful for verifying AV/security-software exclusions are
+  actually configured, not just trusting that they are. macOS/Linux show a
+  thread count only for now — see **Known limitations**.
+- **Interference Watch** — a continuous, more accessible layer on top of
+  Thread Inspection: watch one or a few chosen processes (or every process
+  launched from a designated directory) and get an alert — a "⚠" that stays
+  lit for as long as the condition persists, plus a logged event — the
+  moment any of three signs of interference appears on one of them, not
+  just in a one-off snapshot: a new UNBACKED thread (reflective injection,
+  malware's usual technique for staying off the module list), a new module
+  loading into the process (the technique legitimate AV/EDR hooking
+  actually uses instead, since it wants its DLL visible), or a thread's
+  stack containing a pointer into a third-party module — a coarse
+  approximation of manually "thread stacking" in Process Explorer, and
+  unlike the other two, not relative to a baseline: it can find evidence of
+  a hook that was already there before you started watching, right on the
+  first check, since it scans a thread's whole stack region rather than
+  just what changed. A hit against a short, best-effort known-vendor list
+  gets a friendly label; an unmatched one is still reported, just without
+  one. Deliberately not "watch everything": AV/security software should be
+  scanning regardless, this is for verifying specific exclusions. Adding a
+  watch opens (or focuses) the Interference Watch window itself, so results
+  are never more than one click away; the View/Process menu and tray's
+  "Check for Interference" opens the same window any other time. It lists
+  what's being watched — each with an at-a-glance "✓"/"⚠"/"🛑" status — and
+  the event log (same icons, same meaning), with Copy to Clipboard and
+  Clear. All three signals are Windows-only — see **Known limitations**.
 - **Resizable, persisted layout** — drag the divider between the process table
   and the detail pane, and between the detail info and its children list; both
   positions are remembered across launches, along with the main window size.
 - **"Parent processes only" view** — declutters the table down to processes
   worth drilling into (anything with children, or with no visible parent of
-  its own); click one to open a single read-only "Children" window with live
-  CPU%/Mem% for just its direct children, closer to Task Manager's own
-  grouped-process view.
+  its own); each parent row shows the combined CPU%/Mem% across it and every
+  descendant, Task Manager-style grouped totals, not just its own usage.
+  Click one to open a single "Children" window — sortable columns, a name
+  filter, and End Process, same as the main table — showing live,
+  individual figures for just its direct children.
 - **Resource Details window** — click any top-strip mini graph, or use the
   View menu / tray, to open a bigger, single-resource view, Task Manager-style
   (a resizable list to switch between CPU/Memory/Disk/Network, one large graph
@@ -79,6 +119,14 @@ point. See **Lightweight by design** below.
   in the Window menu and system tray) to instantly hide the main window and
   any open About/Help/Update windows together, and bring back exactly that
   same set later.
+- **Single-instance enforcement** — launching a second copy shows a small
+  "already running" window with a Quit button rather than opening a second
+  full instance (no cross-process IPC, no bringing the first instance's
+  window to the foreground — deliberately simple).
+- **Tooltips** on column headers, buttons, checkboxes, and selects throughout
+  the app (via [dweymouth/fyne-tooltip](https://github.com/dweymouth/fyne-tooltip),
+  since Fyne itself has no built-in tooltip support yet) — hover to see what
+  something does, including the "⚠" Interference Watch column.
 - Light / Dark / System theme, a system tray icon with the same actions as the
   main menu, and a throttled (once-per-day, silent-unless-found) update
   checker with a manual "Check for Updates" always available.
@@ -124,6 +172,19 @@ on a typical Mac.
   info` is near-instant but needs `sudo`; the legacy `airport` binary that
   used to be fast no longer exists on current macOS). The window shows a
   loading state rather than appearing frozen, but the wait itself is real.
+- Thread inspection's start-address resolution ("UNBACKED (possible
+  injection)") is Windows-only — macOS (SIP blocks `task_for_pid` for a
+  third-party app without a special entitlement) and Linux (needs root or
+  `CAP_SYS_PTRACE`) can't read another process's memory the way Windows
+  allows without elevation. It also detects *injected* code, not an
+  AV/EDR-style *hook* patched into an otherwise-legitimate module like
+  `ntdll.dll` — that's a separate, bigger piece of work, not implemented.
+  Interference Watch inherits the same Windows-only constraint — the watch
+  list can still be built on macOS/Linux, but nothing will ever be flagged
+  there. It also only covers *code injection* into a watched process, not
+  the other common meaning of "AV interference" (synchronous file-scan
+  latency from a minifilter driver), which would need a different,
+  ETW-based mechanism.
 - End Process is a hard kill; no graceful-terminate or elevation flow yet.
 
 ## Building & running

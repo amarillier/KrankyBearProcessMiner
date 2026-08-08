@@ -10,12 +10,14 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 
+	fynetooltip "github.com/dweymouth/fyne-tooltip"
+
 	"processminer/internal/startup"
 )
 
 const (
 	// appName    = "KrankyBear ProcessMiner"
-	appVersion = "0.2.0" // see FyneApp.toml
+	appVersion = "0.3.0" // see FyneApp.toml
 	appAuthor  = "Allan Marillier"
 	appID      = "com.github.amarillier.KrankyBearProcessMiner"
 )
@@ -53,6 +55,11 @@ func main() {
 	setupI18n(a, *langFlag) // load message catalog + resolve UI language before building any UI
 	loadTheme(a)
 
+	if anotherInstanceRunning() {
+		showAlreadyRunningAndExit(a)
+		return
+	}
+
 	win := a.NewWindow(appName)
 	win.SetIcon(resourceKrankyBearProcessMinerPng)
 	win.Resize(mainWindowLaunchSize(a)) // restore previous size (size only - Fyne can't restore position)
@@ -60,8 +67,9 @@ func main() {
 	updateResourceDetail, updateResourceDetailProcesses, showResourceDetail := newResourceDetailWindow(a)
 	graphsView, updateGraphs := newSystemGraphsView(showResourceDetail)
 	procSampler = NewSampler()
-	processView, applyProcessSnapshot, refreshNow, endSelected, saveLayout := newProcessView(a, win, procSampler)
+	processView, applyProcessSnapshot, refreshNow, endSelected, saveLayout, interferenceWatcherRef, onWatchListChanged := newProcessView(a, win, procSampler)
 	saveProcessLayout = saveLayout
+	showInterference := func() { showInterferenceWindow(a, interferenceWatcherRef, onWatchListChanged) }
 
 	procSampler.OnSystemSnapshot(func(s SystemSnapshot) {
 		fyne.Do(func() {
@@ -76,9 +84,13 @@ func main() {
 		})
 	})
 
-	win.SetContent(container.NewBorder(graphsView, nil, nil, nil, processView))
-	win.SetMainMenu(buildMenu(a, win, refreshNow, endSelected, showResourceDetail))
-	setupSystemTray(a, win, refreshNow, endSelected, showResourceDetail)
+	// Wraps the window content in a tooltip render layer so ttwidget-based
+	// controls (table headers, buttons, checks, selects) actually show their
+	// SetToolTip text -- Fyne itself has no built-in tooltip support yet.
+	// Torn down in quitApp.
+	win.SetContent(fynetooltip.AddWindowToolTipLayer(container.NewBorder(graphsView, nil, nil, nil, processView), win.Canvas()))
+	win.SetMainMenu(buildMenu(a, win, refreshNow, endSelected, showResourceDetail, showInterference))
+	setupSystemTray(a, win, refreshNow, endSelected, showResourceDetail, showInterference)
 
 	// Boss-key hide (CLAUDE.md "Hide all / show all windows"): no matching
 	// show/resume hotkey by design -- canvas shortcuts only fire on a
@@ -138,6 +150,7 @@ func quitApp(a fyne.App, win fyne.Window) {
 	if procSampler != nil {
 		procSampler.Stop()
 	}
+	fynetooltip.DestroyWindowToolTipLayer(win.Canvas())
 	saveMainWindowGeometry(a, win)
 	if saveProcessLayout != nil {
 		saveProcessLayout()
@@ -147,11 +160,14 @@ func quitApp(a fyne.App, win fyne.Window) {
 
 // ── Menu + tray (mirror each other; see CLAUDE.md "System tray + main menu") ──
 
-func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func(), showResourceDetail func(resourceKind)) *fyne.MainMenu {
+func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func(), showResourceDetail func(resourceKind), showInterference func()) *fyne.MainMenu {
 	fileMenu := fyne.NewMenu("File",
 		fyne.NewMenuItem("Quit", func() { fyne.Do(func() { quitApp(a, win) }) }),
 	)
 	viewMenu := fyne.NewMenu("View",
+		fyne.NewMenuItem("Hide All (Alt+H)", func() { hideAllWindows(win) }),
+		fyne.NewMenuItem("Show All", func() { showAllWindows(win) }),
+		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Light Theme", func() { setLightTheme(a) }),
 		fyne.NewMenuItem("Dark Theme", func() { setDarkTheme(a) }),
 		fyne.NewMenuItem("System Theme", func() { setSystemTheme(a) }),
@@ -162,23 +178,21 @@ func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func(), show
 	processMenu := fyne.NewMenu("Process",
 		fyne.NewMenuItem("Refresh Now", refreshNow),
 		fyne.NewMenuItem("End Process", endSelected),
-	)
-	windowMenu := fyne.NewMenu("Window",
-		fyne.NewMenuItem("Hide All (Alt+H)", func() { hideAllWindows(win) }),
-		fyne.NewMenuItem("Show All", func() { showAllWindows(win) }),
+		fyne.NewMenuItemSeparator(),
+		fyne.NewMenuItem("Check for Interference", showInterference),
 	)
 	helpMenu := fyne.NewMenu("Help",
 		fyne.NewMenuItem("Help", func() { showHelp(a) }),
 		fyne.NewMenuItem("Check for Updates", func() { checkForUpdatesManual(a) }),
 		fyne.NewMenuItem("About", func() { showAbout(a) }),
 	)
-	return fyne.NewMainMenu(fileMenu, viewMenu, processMenu, windowMenu, helpMenu)
+	return fyne.NewMainMenu(fileMenu, viewMenu, processMenu, helpMenu)
 }
 
 // setupSystemTray mirrors the main menu. Tray callbacks fire off the main
 // goroutine, so every body is wrapped in fyne.Do (CLAUDE.md "fyne.Do is
 // mandatory").
-func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func(), showResourceDetail func(resourceKind)) {
+func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func(), showResourceDetail func(resourceKind), showInterference func()) {
 	desk, ok := a.(desktop.App)
 	if !ok {
 		return // not a desktop driver
@@ -189,6 +203,7 @@ func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func()
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Refresh Now", func() { fyne.Do(refreshNow) }),
 		fyne.NewMenuItem("End Process", func() { fyne.Do(endSelected) }),
+		fyne.NewMenuItem("Check for Interference", func() { fyne.Do(showInterference) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Light Theme", func() { fyne.Do(func() { setLightTheme(a) }) }),
 		fyne.NewMenuItem("Dark Theme", func() { fyne.Do(func() { setDarkTheme(a) }) }),
