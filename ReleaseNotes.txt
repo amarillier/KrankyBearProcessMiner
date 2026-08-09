@@ -4,11 +4,9 @@ KrankyBear ProcessMiner -- cross-platform (Windows, Linux, macOS) process/system
 Future ideas:
 - Persist watched processes/directories in Preferences across launches, with a reactivation flow at startup (see/choose to reactivate, edit, or leave disabled). Bigger than it first looks: PIDs aren't meaningful across a restart, so a process watch would need to persist by *name* (or exe path) instead and re-match against whatever's actually running next launch -- straightforward for directory watches (just the path), needs real design for process watches (what if two processes share a name? what if it never comes back?). The auto-open/focus half of this same idea shipped already (see 0.3.0 below); this is just the persistence/reactivation half.
 
-- Options to show number of file handles and other similar information, but only if it is useful in perf troubleshooting?
-
-- Authenticode/code-signing check (moderate) — flag unsigned or oddly-signed executables. Windows-first (Crypto API), same trust-but-verify use case, different angle (unauthorized/malicious binary, not AV behavior).
-
 - ETW-based work (bigger investment, biggest payoff) — this is the one I'd actually prioritize if you want the next big leap: consuming Event Tracing for Windows unlocks three things this app already documents as gaps in one shot — real per-process network usage, real per-process I/O latency (not just throughput), and the minifilter file-scan interference detection I flagged as missing last time. It's a materially bigger piece of plumbing than anything shipped so far, but it's the same investment that pays for all three rather than three separate efforts.
+
+- Per-process open-handles/files window (listing each individual open handle/fd with what it actually points to, not just the count the Handles column already shows) -- promoted here from "some day maybe" after real use: the 0.4.0 Handles column immediately surfaced a process with a surprisingly high count, which the count alone can't explain -- you need the list of *what* to actually debug it. Feasibility is uneven across platforms, though: Linux is easy (/proc/[pid]/fd already resolves each entry to a path); macOS is moderate (the same proc_pidinfo call the count uses can list each fd, and proc_pidfdinfo/PROC_PIDFDVNODEPATHINFO resolves file-backed ones to a path, no root needed for your own processes); Windows is the hard one -- undocumented NtQuerySystemInformation(SystemHandleInformation) plus per-handle NtQueryObject name resolution, and querying certain handle types (notably a named pipe with no listener) can hang, needing a timeout/worker-thread workaround. Comparable in size to the thread-list/stack-scan work already shipped, not a quick add.
 
 
 Some day maybe, maybe never - defer for now
@@ -16,8 +14,101 @@ Some day maybe, maybe never - defer for now
 - GPU resource use - Windows only since not readily available for Mac/Linux, maybe some day if we perceive value
 - Process CPU affinity / priority controls -- scrapped rather than deferred: affinity has no real macOS support at all (Apple's affinity API is advisory-only, a non-starter on Apple Silicon), and priority is a rare power-user action for most people. Not worth the cross-platform inconsistency for the value.
 - ntdll.dll hook-byte comparison (on-disk vs in-memory at known Nt* API entry points) + unbacked-executable-memory-region scan, Windows only -- the actual "prove an AV/EDR hook or malware patched something" signal, bigger than the thread-list-with-start-address-resolution shipped in 0.3.0. Revisit once that's proven useful in practice.
-- Per-process file handle enumeration -- Windows needs undocumented NtQuerySystemInformation(SystemHandleInformation)/NtQueryObject techniques (harder than the thread-list work, no clean equivalent to NtQuerySystemInformation(SystemProcessInformation)'s already-resolved start addresses); Linux is straightforward via /proc/[pid]/fd; macOS has no comparable API for arbitrary processes without root+entitlements.
 - Synchronous file-scan interference detection (the *other* common meaning of "AV interference" -- a minifilter driver intercepting file I/O and scanning it before letting the open complete, adding latency to the target process while the AV's own process burns CPU) -- Interference Watch (0.3.0) only covers things happening *inside* the watched process itself (an unbacked thread, a newly-loaded module), not this. Would need ETW consumption and correlating I/O latency against the AV process, a materially different and bigger mechanism than either signal shipped so far.
+
+Version 0.4.0 - August 08, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW "Top Disk" consumer filter on the main table
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Resource Details' own Top Consumers panel has had a Disk threshold
+  (≥10/100/500/1000 KB/s) since 0.2.0; the main table's "Top CPU"/"Top Mem"
+  selects had no Disk equivalent, even though per-process Disk R/W was
+  already being sampled every tick -- a real inconsistency, now closed.
+  Same tiers, same widget, same OR-combined semantics as CPU/Mem (a
+  process shows if it clears *any* one of the enabled thresholds, not
+  all of them).
+- Corrected a stale code comment while in there: per-process disk I/O does
+  work on macOS via gopsutil (confirmed empirically earlier this project),
+  contrary to what an old comment still claimed.
+
+✨ NEW "Top Memory" consumer filter (absolute bytes, not just percent)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- "Top Mem" filters by percentage, which answers a different question than
+  "how much memory, in absolute terms" -- 5% is nothing on a 128GB
+  workstation and enormous on a 16GB laptop. New "Top Memory" select (Off /
+  ≥100 MB / ≥500 MB / ≥1 GB / ≥4 GB) filters on the actual RSS byte value
+  the new Memory column already shows, combined via OR with the other
+  three Top filters same as always.
+
+✨ NEW Clickable Top Consumers (Resource Details window)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Clicking a row in the Top Consumers panel now brings the main window
+  forward with that process selected in the table, same as clicking a
+  child in the detail pane's children list. Previously the panel was
+  read-only -- useful for spotting what's driving CPU/Memory/Disk, but
+  with no way to actually go look at the process it named.
+
+🔧 Narrower main window
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- "Show Threads", "Watch for Interference", and "End Process" moved off
+  the crowded filters row onto their own third toolbar row. All the Top
+  CPU/Mem/Memory/Disk filters plus those three action buttons had grown
+  too wide to fit a laptop display on one row; trading one row of process
+  names for a shorter, non-scrolling toolbar is worth it.
+
+🐛 FIXED Threads window going stale (or duplicating) when you select a
+   different process
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found via real-world use: the Children drill-down window already follows
+  whatever process gets selected next (main table, Resource Details' Top
+  Consumers); the Threads window didn't -- it kept showing the first
+  process you opened it for, and clicking "Show Threads" again for a new
+  selection just opened a confusing second Threads window instead of
+  updating the first. Threads now behaves the same as Children: only one
+  window, and it follows the selection automatically while it's open.
+
+✨ NEW "Averaged over" rolling window (Resource Details' Top Consumers)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The Top Consumers list previously ranked purely off the latest sample --
+  fine for a process that's steadily heavy, but a bursty one (say, 80% CPU
+  for a second every few seconds) could show up or vanish depending on
+  exactly which instant you looked. New "Averaged over" select (Off / 10s /
+  30s / 1 min / 2 min) ranks and filters by each process's average over
+  that trailing window instead, with the header noting which window is
+  active (e.g. "Top CPU consumers (30s avg)"). Off preserves the original
+  instantaneous behavior as the default.
+
+✨ NEW "Check Signature" (Authenticode/code-signing check, Windows-first)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- A different angle on the same trust-but-verify idea as Thread Inspection
+  and Interference Watch, but aimed at the executable file itself rather
+  than its runtime behavior. Select a process and click "Check Signature"
+  for a one-off Authenticode check of its on-disk .exe: ✓ signed and
+  trusted, ⚠ not signed at all (not necessarily malicious, but worth a
+  second look), or 🛑 signed with a problem (hash mismatch, untrusted/
+  self-signed or expired certificate).
+- Also checks Windows' catalog-signing mechanism, not just an embedded
+  signature -- found via real-world testing against this Windows box: most
+  System32 binaries (e.g. notepad.exe) are catalog-signed rather than
+  individually signed, so checking only for an embedded signature would've
+  flagged a huge share of stock Windows as "unsigned," the opposite of
+  useful. No revocation check (would mean a network fetch per check,
+  against this app's offline-first design elsewhere) -- a structural check
+  (is it signed, does the chain lead to a trusted authority), not a live
+  "has this been revoked since" verdict.
+
+✨ NEW "Handles" column (open handles / file descriptors, all 3 platforms)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- New main-table column: open handles on Windows, open file descriptors on
+  macOS/Linux -- the same underlying idea everywhere, and unlike Private,
+  genuinely available on all three: gopsutil's NumFDs() turned out to be a
+  single cheap syscall on every platform (confirmed by reading its actual
+  per-OS source, then empirically on both this Mac and the Windows box,
+  before trusting it -- see CLAUDE.md's standing caution about assuming a
+  gopsutil field is cheap). A count that climbs steadily and never comes
+  back down, even while a process otherwise looks idle, is a classic sign
+  of a handle/fd leak -- exactly the kind of thing behind a process slowly
+  degrading or eventually hanging.
 
 Version 0.3.0 - August 07, 2026
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

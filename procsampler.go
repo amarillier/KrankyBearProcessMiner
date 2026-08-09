@@ -45,6 +45,20 @@ type ProcInfo struct {
 	// not real private memory, so showing it as "Private" would be actively
 	// misleading. See platform notes in sampleProcesses.
 	PrivateBytes uint64
+	// HandleCount is open handles on Windows, open file descriptors on
+	// macOS/Linux -- the same underlying idea (a classic handle-leak signal:
+	// a process slowly climbing here, unbounded, while otherwise looking
+	// healthy, is a good early sign something's wrong before it degrades or
+	// falls over). 0 means N/A (permission-denied, exited mid-scan, etc.),
+	// same convention as PrivateBytes -- a live process always holds at
+	// least a few. Unlike PrivateBytes this one really is available on all
+	// three platforms: gopsutil's NumFDs() is a single cheap syscall
+	// everywhere (OpenProcess+GetProcessHandleCount on Windows, one
+	// proc_pidinfo(PROC_PIDLISTFDS) call on macOS, one /proc/[pid]/fd
+	// directory read on Linux) -- confirmed by reading gopsutil's actual
+	// per-platform source before trusting it, per this app's own
+	// established "don't assume a gopsutil field is cheap" caution.
+	HandleCount int32
 }
 
 // ProcDetail holds the process fields that are comparatively expensive to
@@ -324,6 +338,9 @@ func (s *Sampler) sampleProcesses() {
 		// smaps-equivalent gopsutil call to derive a real figure from.
 		if pb := linuxPrivateBytes(cached); pb > 0 {
 			info.PrivateBytes = pb
+		}
+		if n, err := cached.NumFDs(); err == nil && n > 0 {
+			info.HandleCount = n
 		}
 		if user, err := cached.Username(); err == nil {
 			info.Username = user

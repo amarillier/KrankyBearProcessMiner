@@ -17,7 +17,7 @@ import (
 
 const (
 	// appName    = "KrankyBear ProcessMiner"
-	appVersion = "0.3.0" // see FyneApp.toml
+	appVersion = "0.4.0" // see FyneApp.toml
 	appAuthor  = "Allan Marillier"
 	appID      = "com.github.amarillier.KrankyBearProcessMiner"
 )
@@ -64,12 +64,13 @@ func main() {
 	win.SetIcon(resourceKrankyBearProcessMinerPng)
 	win.Resize(mainWindowLaunchSize(a)) // restore previous size (size only - Fyne can't restore position)
 
-	updateResourceDetail, updateResourceDetailProcesses, showResourceDetail := newResourceDetailWindow(a)
-	graphsView, updateGraphs := newSystemGraphsView(showResourceDetail)
 	procSampler = NewSampler()
-	processView, applyProcessSnapshot, refreshNow, endSelected, saveLayout, interferenceWatcherRef, onWatchListChanged := newProcessView(a, win, procSampler)
+	processView, applyProcessSnapshot, refreshNow, endSelected, saveLayout, interferenceWatcherRef, onWatchListChanged, jumpToPID := newProcessView(a, win, procSampler)
 	saveProcessLayout = saveLayout
 	showInterference := func() { showInterferenceWindow(a, interferenceWatcherRef, onWatchListChanged) }
+
+	updateResourceDetail, updateResourceDetailProcesses, showResourceDetail := newResourceDetailWindow(a, jumpToPID)
+	graphsView, updateGraphs := newSystemGraphsView(showResourceDetail)
 
 	procSampler.OnSystemSnapshot(func(s SystemSnapshot) {
 		fyne.Do(func() {
@@ -174,12 +175,12 @@ func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func(), show
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Resource Details", func() { showResourceDetail(resCPU) }),
 		fyne.NewMenuItem("System Info", func() { showSystemInfo(a) }),
+		fyne.NewMenuItem("Watch for Interference", showInterference),
 	)
 	processMenu := fyne.NewMenu("Process",
 		fyne.NewMenuItem("Refresh Now", refreshNow),
 		fyne.NewMenuItem("End Process", endSelected),
 		fyne.NewMenuItemSeparator(),
-		fyne.NewMenuItem("Check for Interference", showInterference),
 	)
 	helpMenu := fyne.NewMenu("Help",
 		fyne.NewMenuItem("Help", func() { showHelp(a) }),
@@ -203,7 +204,6 @@ func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func()
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Refresh Now", func() { fyne.Do(refreshNow) }),
 		fyne.NewMenuItem("End Process", func() { fyne.Do(endSelected) }),
-		fyne.NewMenuItem("Check for Interference", func() { fyne.Do(showInterference) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Light Theme", func() { fyne.Do(func() { setLightTheme(a) }) }),
 		fyne.NewMenuItem("Dark Theme", func() { fyne.Do(func() { setDarkTheme(a) }) }),
@@ -211,6 +211,7 @@ func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func()
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Resource Details", func() { fyne.Do(func() { showResourceDetail(resCPU) }) }),
 		fyne.NewMenuItem("System Info", func() { fyne.Do(func() { showSystemInfo(a) }) }),
+		fyne.NewMenuItem("Watch for Interference", func() { fyne.Do(showInterference) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Help", func() { fyne.Do(func() { showHelp(a) }) }),
 		fyne.NewMenuItem("Check for Updates", func() { checkForUpdatesManual(a) }),

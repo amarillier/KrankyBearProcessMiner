@@ -31,6 +31,7 @@ const (
 	sortDiskRead
 	sortDiskWrite
 	sortPrivate
+	sortHandles
 	sortAlert   // interference-watch indicator -- see interference.go; not sortable, see compareProc
 	sortNotable // AV/EDR recognition + process-masquerading heuristic -- see notable.go; not sortable, see compareProc
 )
@@ -51,9 +52,10 @@ var procColumns = []procColumn{
 	{"CPU %", sortCPU, 70, "Share of total CPU capacity this process is currently using"},
 	{"Mem %", sortMem, 70, "Share of total physical memory this process is currently using"},
 	{"Memory", sortMemBytes, 90, "Actual physical memory in use (RSS -- Resident Set Size), the same figure Mem % is computed from. In the Parent-processes view, this is the combined total across the parent and every descendant."},
+	{"Private", sortPrivate, 90, "Private memory: real Private Bytes on Windows, an RSS-minus-shared approximation on Linux, N/A on macOS (see Help)"},
 	{"Disk R", sortDiskRead, 80, "Disk read rate for this process (KB/s)"},
 	{"Disk W", sortDiskWrite, 80, "Disk write rate for this process (KB/s)"},
-	{"Private", sortPrivate, 90, "Private memory: real Private Bytes on Windows, an RSS-minus-shared approximation on Linux, N/A on macOS (see Help)"},
+	{"Handles", sortHandles, 80, "Open handles (Windows) / open file descriptors (macOS, Linux). A count that climbs steadily and never comes back down, even while the process otherwise looks idle, is a classic sign of a handle/fd leak"},
 	{"Notable", sortNotable, 160, "Recognized security software (best-effort name match -- see Help), or a process-masquerading mismatch worth a second look (e.g. svchost.exe not launched by services.exe)"},
 }
 
@@ -67,6 +69,21 @@ var consumerThresholdValues = map[string]float64{
 	"≥5%":  5,
 	"≥10%": 10,
 	"≥25%": 25,
+}
+
+// memBytesThresholdOptions/-Values back the "Top Memory" select -- an
+// absolute-size complement to "Top Mem"'s percentage: 5% means something
+// very different on a 16GB laptop than on a 128GB workstation, so an
+// absolute threshold answers a genuinely different question than a
+// relative one, not just the same thing in different units.
+var memBytesThresholdOptions = []string{"Off", "≥100 MB", "≥500 MB", "≥1 GB", "≥4 GB"}
+
+var memBytesThresholdValues = map[string]uint64{
+	"Off":     0,
+	"≥100 MB": 100 * 1024 * 1024,
+	"≥500 MB": 500 * 1024 * 1024,
+	"≥1 GB":   1024 * 1024 * 1024,
+	"≥4 GB":   4 * 1024 * 1024 * 1024,
 }
 
 // Split-divider positions, persisted like main window size (see main.go's
@@ -109,7 +126,9 @@ type procViewState struct {
 	filterRegex    *regexp.Regexp // compiled from filterText when useRegexFilter is on; nil if off, empty, or invalid (fails open -- see recompileFilterRegex)
 	minCPU         float64        // "top consumer" thresholds; 0 = off (see passesConsumerThreshold)
 	minMem         float64
-	parentsOnly    bool // "Parent processes" view -- see isParentRow
+	minDisk        float64 // KB/s (combined read+write), reuses resourceview.go's diskThresholdValues tiers
+	minMemBytes    uint64  // absolute RSS threshold, see memBytesThresholdValues -- distinct question from minMem's percentage
+	parentsOnly    bool    // "Parent processes" view -- see isParentRow
 	sortCol        sortField
 	sortAsc        bool
 	selectedPID    int32 // -1 = none
@@ -139,6 +158,7 @@ type procViewState struct {
 	filterEntry *widget.Entry
 	threadsBtn  *ttwidget.Button
 	watchBtn    *ttwidget.Button
+	sigBtn      *ttwidget.Button
 	endBtn      *ttwidget.Button
 
 	detailTitle    *widget.Label
@@ -165,6 +185,24 @@ type procViewState struct {
 	childWinTable       *widget.Table
 	childWinFilterEntry *widget.Entry
 	childWinEndBtn      *ttwidget.Button
+
+	// threadsWin is the single reusable Threads window opened via
+	// "Show Threads" (see threadsview.go) -- only one is ever open at a
+	// time; selecting a different process elsewhere (main table, a child
+	// window, Resource Details' Top Consumers) updates it in place instead
+	// of opening a second one, mirroring childWin's "only one at a time"
+	// pattern. Unlike childWin it does not poll every recompute() -- a
+	// thread snapshot is deliberately a fresh look, not a live view (see
+	// threadsview.go) -- it only re-snapshots when the *selected process*
+	// changes.
+	threadsWin             fyne.Window
+	threadsWinPID          int32 // pid currently shown, -1 = none
+	threadsWinSummary      ThreadSummary
+	threadsWinTable        *widget.Table
+	threadsWinBanner       *widget.Label
+	threadsWinTableSection fyne.CanvasObject
+	threadsWinCountLabel   *widget.Label
+	threadsWinStack        *fyne.Container
 }
 
 // newProcessView builds the process table, toolbar and detail pane. The
@@ -180,16 +218,18 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	saveLayout func(),
 	watcher *interferenceWatcher,
 	refreshAfterWatchChange func(),
+	jumpToPID func(int32),
 ) {
 	st := &procViewState{
-		app:         a,
-		win:         win,
-		sampler:     sampler,
-		selectedPID: -1,
-		childWinPID: -1,
-		sortCol:     sortCPU,
-		sortAsc:     false,
-		watcher:     newInterferenceWatcher(),
+		app:           a,
+		win:           win,
+		sampler:       sampler,
+		selectedPID:   -1,
+		childWinPID:   -1,
+		threadsWinPID: -1,
+		sortCol:       sortCPU,
+		sortAsc:       false,
+		watcher:       newInterferenceWatcher(),
 	}
 
 	st.table = widget.NewTable(
@@ -244,24 +284,45 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	intervalSelect.SetSelected("2s")
 	intervalSelect.SetToolTip("How often the process list resamples")
 
-	// "Top consumer" filter: surfaces anything heavy on CPU or memory. Off
-	// by default so behavior is unchanged unless the user opts in -- known
-	// gap: no per-process disk/network figures are sampled yet (macOS has
-	// no per-process disk I/O via gopsutil, and none of the platforms
-	// collect per-process network use), so this only covers CPU/Mem for now.
+	// "Top consumer" filter: surfaces anything heavy on CPU, memory, or disk
+	// I/O. Off by default so behavior is unchanged unless the user opts in.
+	// No per-process network use here -- no platform offers a simple API
+	// for it (Windows' own Task Manager relies on ETW tracing for that).
 	cpuThresholdSelect := ttwidget.NewSelect(consumerThresholdOptions, func(sel string) {
 		st.minCPU = consumerThresholdValues[sel]
 		st.applyFilterAndRefresh()
 	})
 	cpuThresholdSelect.SetSelected("Off")
-	cpuThresholdSelect.SetToolTip("Hide processes below this CPU% (combines with Top Mem via OR: a process passes if it clears either)")
+	cpuThresholdSelect.SetToolTip("Hide processes below this CPU% (combines with the other Top filters via OR: a process passes if it clears any one)")
 
 	memThresholdSelect := ttwidget.NewSelect(consumerThresholdOptions, func(sel string) {
 		st.minMem = consumerThresholdValues[sel]
 		st.applyFilterAndRefresh()
 	})
 	memThresholdSelect.SetSelected("Off")
-	memThresholdSelect.SetToolTip("Hide processes below this Mem% (combines with Top CPU via OR: a process passes if it clears either)")
+	memThresholdSelect.SetToolTip("Hide processes below this Mem% (combines with the other Top filters via OR: a process passes if it clears any one)")
+
+	// Reuses resourceview.go's diskThresholdOptions/-Values (KB/s tiers,
+	// not percent -- per-process disk I/O rates run much lower than
+	// percent-scale figures) -- the same Resource Details' own Top
+	// Consumers panel already offers, just missing here until now.
+	diskThresholdSelect := ttwidget.NewSelect(diskThresholdOptions, func(sel string) {
+		st.minDisk = diskThresholdValues[sel]
+		st.applyFilterAndRefresh()
+	})
+	diskThresholdSelect.SetSelected("Off")
+	diskThresholdSelect.SetToolTip("Hide processes below this combined read+write rate (combines with the other Top filters via OR: a process passes if it clears any one)")
+
+	// Absolute-byte complement to "Top Mem"'s percentage -- 5% means a very
+	// different amount of memory on a 16GB laptop than on a 128GB
+	// workstation, so this answers a genuinely different question, not
+	// just the same one in different units.
+	memBytesThresholdSelect := ttwidget.NewSelect(memBytesThresholdOptions, func(sel string) {
+		st.minMemBytes = memBytesThresholdValues[sel]
+		st.applyFilterAndRefresh()
+	})
+	memBytesThresholdSelect.SetSelected("Off")
+	memBytesThresholdSelect.SetToolTip("Hide processes using less than this much actual memory (RSS) -- an absolute-size complement to Top Mem's percentage (combines with the other Top filters via OR: a process passes if it clears any one)")
 
 	refreshBtn := ttwidget.NewButton("Refresh Now", func() { sampler.RefreshProcessesNow() })
 	refreshBtn.SetToolTip("Resample the process list immediately instead of waiting for the next tick")
@@ -277,6 +338,13 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 		// gets flagged. See Help for the platform explanation.
 		st.watchBtn.SetText("Watch for Interference (Windows only)")
 		st.watchBtn.SetToolTip("Needs Windows-only APIs to resolve thread start addresses -- see Help")
+	}
+	st.sigBtn = ttwidget.NewButton("Check Signature", st.checkSignatureForSelected)
+	st.sigBtn.SetToolTip("Verify the selected process's executable is signed with a valid, trusted certificate (Authenticode) -- flags unsigned or oddly-signed binaries, a different angle from Interference Watch's AV-behavior focus")
+	st.sigBtn.Disable()
+	if !signatureCheckSupported {
+		st.sigBtn.SetText("Check Signature (Windows only)")
+		st.sigBtn.SetToolTip("Needs Windows' Authenticode/WinVerifyTrust API -- see Help")
 	}
 	st.endBtn = ttwidget.NewButton("End Process", st.endSelected)
 	st.endBtn.SetToolTip("Terminate the selected process (with a confirmation prompt first)")
@@ -295,12 +363,22 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 		parentsOnlyCheck,
 		widget.NewLabel("Top CPU"), cpuThresholdSelect,
 		widget.NewLabel("Top Mem"), memThresholdSelect,
+		widget.NewLabel("Top Memory"), memBytesThresholdSelect,
+		widget.NewLabel("Top Disk"), diskThresholdSelect,
+	)
+
+	// Selected-process actions get their own row rather than crowding onto
+	// optionsRow -- keeping everything on one wide row was pushing the main
+	// window wider than a laptop display; a third, shorter row costs one row
+	// of process names but fits everything else without horizontal scrolling.
+	actionsRow := container.NewHBox(
 		st.threadsBtn,
 		st.watchBtn,
+		st.sigBtn,
 		st.endBtn,
 	)
 
-	toolbar := container.NewVBox(filterRow, optionsRow)
+	toolbar := container.NewVBox(filterRow, optionsRow, actionsRow)
 
 	tableSection := container.NewBorder(toolbar, nil, nil, nil, st.table)
 
@@ -327,7 +405,21 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 		a.Preferences().SetFloat(prefDetailSplitOffset, detailSplit.Offset)
 	}
 
-	return view, st.applySnapshot, func() { sampler.RefreshProcessesNow() }, st.endSelected, saveLayout, st.watcher, st.refreshAfterWatchChange
+	// jumpToPID brings the main window forward and selects pid in the main
+	// table -- for external triggers like Resource Details' Top Consumers
+	// list, a separate window with no other way to say "show me exactly
+	// this process." Reuses selectPID's existing "clear the name filter if
+	// it's hiding the target" handling; doesn't touch "Parent processes
+	// only" or the Top CPU/Mem/Memory/Disk thresholds, so a target hidden
+	// by one of those still won't be found -- narrow, deliberate scope for
+	// now rather than silently clearing filters a caller didn't ask about.
+	jumpToPID = func(pid int32) {
+		st.win.Show()
+		st.win.RequestFocus()
+		st.selectPID(pid)
+	}
+
+	return view, st.applySnapshot, func() { sampler.RefreshProcessesNow() }, st.endSelected, saveLayout, st.watcher, st.refreshAfterWatchChange, jumpToPID
 }
 
 // refreshAfterWatchChange re-syncs the main table's own watch button/alert
@@ -470,19 +562,25 @@ func (st *procViewState) recompute() {
 	st.displayRows = rows
 }
 
-// passesConsumerThreshold implements the "top consumer" filter: if both
-// thresholds are off (0), every process passes (matching pre-filter
-// behavior). Otherwise a process passes if it clears *either* threshold --
-// the point is surfacing anything heavy on CPU or heavy on memory, not
-// requiring both.
+// passesConsumerThreshold implements the "top consumer" filter: if every
+// threshold is off (0), every process passes (matching pre-filter
+// behavior). Otherwise a process passes if it clears *any* enabled
+// threshold -- the point is surfacing anything heavy on CPU, memory, or
+// disk I/O, not requiring all three at once.
 func (st *procViewState) passesConsumerThreshold(p ProcInfo) bool {
-	if st.minCPU <= 0 && st.minMem <= 0 {
+	if st.minCPU <= 0 && st.minMem <= 0 && st.minDisk <= 0 && st.minMemBytes <= 0 {
 		return true
 	}
 	if st.minCPU > 0 && p.CPUPercent >= st.minCPU {
 		return true
 	}
 	if st.minMem > 0 && float64(p.MemPercent) >= st.minMem {
+		return true
+	}
+	if st.minDisk > 0 && p.DiskReadKBs+p.DiskWriteKBs >= st.minDisk {
+		return true
+	}
+	if st.minMemBytes > 0 && p.RSSBytes >= st.minMemBytes {
 		return true
 	}
 	return false
@@ -587,6 +685,8 @@ func compareProc(a, b ProcInfo, field sortField) int {
 		return cmpFloat64(a.DiskWriteKBs, b.DiskWriteKBs)
 	case sortPrivate:
 		return cmpUint64(a.PrivateBytes, b.PrivateBytes)
+	case sortHandles:
+		return cmpInt32(a.HandleCount, b.HandleCount)
 	case sortAlert:
 		return 0 // flagged status lives in procViewState.flaggedPIDs, not on ProcInfo -- not sortable
 	case sortNotable:
@@ -709,6 +809,12 @@ func (st *procViewState) updateCell(id widget.TableCellID, o fyne.CanvasObject) 
 			label.SetText("N/A")
 		} else {
 			label.SetText(formatBytes(p.PrivateBytes))
+		}
+	case sortHandles:
+		if p.HandleCount == 0 {
+			label.SetText("N/A")
+		} else {
+			label.SetText(strconv.Itoa(int(p.HandleCount)))
 		}
 	}
 }
@@ -845,6 +951,17 @@ func (st *procViewState) renderDetail(p ProcInfo) {
 	st.threadsBtn.Enable()
 	st.endBtn.Enable()
 	st.updateWatchBtn()
+	if signatureCheckSupported {
+		st.sigBtn.Enable()
+	}
+
+	// If the Threads window is already open on some other process, follow
+	// the selection over to this one instead of leaving it stale -- the gap
+	// that used to make re-clicking "Show Threads" open a confusing second
+	// window pointed at the old process (see openOrRefreshThreadsWindow).
+	if st.threadsWin != nil && st.threadsWinPID != p.PID {
+		st.openOrRefreshThreadsWindow(p.PID, p.Name)
+	}
 
 	pid, username := p.PID, p.Username
 	go func() {
@@ -881,6 +998,7 @@ func (st *procViewState) clearDetail() {
 	st.childList.Refresh()
 	st.threadsBtn.Disable()
 	st.watchBtn.Disable()
+	st.sigBtn.Disable()
 	st.endBtn.Disable()
 }
 
@@ -896,7 +1014,43 @@ func (st *procViewState) showThreadsForSelected() {
 	if !ok {
 		return
 	}
-	showThreads(st.app, st.win, pid, p.Name)
+	st.openOrRefreshThreadsWindow(pid, p.Name)
+}
+
+// checkSignatureForSelected runs an Authenticode check (see signature.go /
+// signature_windows.go) against the currently selected process's on-disk
+// executable and shows the result in a dialog -- a one-off check, like
+// "Show Threads", not a per-tick column: resolving the exe path and running
+// WinVerifyTrust both do real disk/crypto work, too expensive to repeat for
+// every row on every sample tick.
+func (st *procViewState) checkSignatureForSelected() {
+	pid := st.selectedPID
+	if pid < 0 {
+		return
+	}
+	p, ok := st.byPID[pid]
+	if !ok {
+		return
+	}
+	name := p.Name
+
+	go func() {
+		exe := resolveProcessExe(pid)
+		if exe == "" {
+			fyne.Do(func() {
+				dialog.ShowError(fmt.Errorf("couldn't determine %q (PID %d)'s executable path to check", name, pid), st.win)
+			})
+			return
+		}
+		res, err := checkFileSignature(exe)
+		fyne.Do(func() {
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("couldn't check signature for %q (PID %d): %w", name, pid, err), st.win)
+				return
+			}
+			dialog.ShowInformation("Check Signature", formatSignatureResult(name, pid, exe, res), st.win)
+		})
+	}()
 }
 
 // updateWatchBtn syncs the "Watch for Interference" button's label/enabled
@@ -1122,6 +1276,12 @@ func (st *procViewState) updateChildWinCell(id widget.TableCellID, o fyne.Canvas
 			label.SetText("N/A")
 		} else {
 			label.SetText(formatBytes(p.PrivateBytes))
+		}
+	case sortHandles:
+		if p.HandleCount == 0 {
+			label.SetText("N/A")
+		} else {
+			label.SetText(strconv.Itoa(int(p.HandleCount)))
 		}
 	}
 }

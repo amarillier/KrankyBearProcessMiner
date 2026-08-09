@@ -28,16 +28,20 @@ point. See **Lightweight by design** below.
   updated every second, with the current numeric values shown alongside each
   graph.
 - **Sortable, resizable process table** — PID, Name, PPID, User, CPU%, Mem%,
-  Memory, Disk R, Disk W, Private, Notable; click a header to sort, click
-  again to reverse; drag a column boundary to resize. Long process names
-  are ellipsized to fit the column instead of overflowing into the next
-  one. Memory shows actual physical memory in use (RSS), the same figure
-  Mem% is computed from, on all three platforms — in the Parent-processes
-  view both show the combined total across the parent and every
-  descendant, same as CPU%. Disk R/W show live per-process read/write
-  KB/s; Private shows real
+  Memory, Disk R, Disk W, Private, Handles, Notable; click a header to sort,
+  click again to reverse; drag a column boundary to resize. Long process
+  names are ellipsized to fit the column instead of overflowing into the
+  next one. Memory shows actual physical memory in use (RSS), the same
+  figure Mem% is computed from, on all three platforms — in the
+  Parent-processes view both show the combined total across the parent and
+  every descendant, same as CPU%. Disk R/W show live per-process
+  read/write KB/s; Private shows real
   Private Bytes on Windows, an RSS-minus-shared-pages approximation on
-  Linux, and N/A on macOS (see **Known limitations**). Either reads N/A for
+  Linux, and N/A on macOS (see **Known limitations**). Handles shows open
+  handles on Windows, open file descriptors on macOS/Linux — genuinely
+  available on all three platforms (a single cheap syscall everywhere) —
+  and a count that climbs steadily and never comes back down is a classic
+  sign of a handle/fd leak. Either Private or Handles reads N/A for
   a process you don't own, same as any other permission-restricted field.
   Notable (Windows) labels a row as recognized security software, or flags
   a process-masquerading mismatch (e.g. a fake svchost.exe not actually
@@ -53,7 +57,9 @@ point. See **Lightweight by design** below.
   (possible injection)" if it falls outside all of them, the classic sign of
   code injection. Useful for verifying AV/security-software exclusions are
   actually configured, not just trusting that they are. macOS/Linux show a
-  thread count only for now — see **Known limitations**.
+  thread count only for now — see **Known limitations**. Only one Threads
+  window is ever open — selecting a different process elsewhere while it's
+  open updates it in place rather than opening a second one.
 - **Interference Watch** — a continuous, more accessible layer on top of
   Thread Inspection: watch one or a few chosen processes (or every process
   launched from a designated directory) and get an alert — a "⚠" that stays
@@ -78,6 +84,17 @@ point. See **Lightweight by design** below.
   what's being watched — each with an at-a-glance "✓"/"⚠"/"🛑" status — and
   the event log (same icons, same meaning), with Copy to Clipboard and
   Clear. All three signals are Windows-only — see **Known limitations**.
+- **Check Signature** — a different angle on the same trust-but-verify idea,
+  aimed at the executable file itself rather than its runtime behavior:
+  select a process and click "Check Signature" for a one-off Authenticode
+  check of its on-disk .exe (Windows-only). Reports ✓ signed and trusted, ⚠
+  not signed at all (not necessarily malicious, but worth a second look), or
+  🛑 signed with a problem (hash mismatch, untrusted/self-signed or expired
+  certificate). Also checks Windows' catalog-signing mechanism, not just an
+  embedded signature — most System32 binaries are catalog-signed rather
+  than individually signed, so checking only for an embedded one would flag
+  a huge share of stock Windows as "unsigned." No revocation check (would
+  mean a network fetch per check) — a structural check, not a live verdict.
 - **Resizable, persisted layout** — drag the divider between the process table
   and the detail pane, and between the detail info and its children list; both
   positions are remembered across launches, along with the main window size.
@@ -96,7 +113,12 @@ point. See **Lightweight by design** below.
   a blank graph. A Top Consumers panel shows which processes are actually
   driving CPU/Memory/Disk (name + that one metric), filtered by an adjustable
   threshold rather than a fixed "top N" — not available for Network (no
-  per-process network API exists).
+  per-process network API exists). Click a row to jump straight to it in the
+  main window's process table, same as clicking a child in the detail pane.
+  An "Averaged over" select (Off / 10s / 30s / 1 min / 2 min) ranks and
+  filters by each process's average over that trailing window instead of
+  just the latest sample, for catching a bursty-but-heavy consumer a single
+  instantaneous sample could just as easily catch mid-lull as mid-spike.
 - **System Info window** (View menu / tray) — a point-in-time summary:
   computer name and OS/platform/version/architecture, CPU model/cores/
   logical processors/speed, total memory, mounted disk volumes with size,
@@ -107,11 +129,16 @@ point. See **Lightweight by design** below.
   can take 10+ seconds on macOS specifically (see Known limitations).
 - **Filter by name**, with an optional **regex mode** (e.g.
   `^(?i)(process|activity).*` to compare just this app's own processes
-  against Activity Monitor's), plus a **"Top CPU" / "Top Mem" consumer
-  filter** (Off / ≥1% / ≥5% / ≥10% / ≥25%, independently adjustable) to
-  instantly narrow a busy process list down to whatever's actually using
-  resources — a combination not offered out of the box by any of the
-  platform-native tools this app draws on.
+  against Activity Monitor's), plus **"Top CPU" / "Top Mem" / "Top Memory" /
+  "Top Disk" consumer filters** (Off / ≥1% / ≥5% / ≥10% / ≥25% for CPU/Mem;
+  Off / ≥100 MB / ≥500 MB / ≥1 GB / ≥4 GB for Memory — an absolute-size
+  complement to Top Mem's percentage, since 5% means something very
+  different on a 16GB laptop than a 128GB workstation; Off / ≥10 / ≥100 /
+  ≥500 / ≥1000 KB/s for Disk — same tiers as Resource Details' own Top
+  Consumers panel), independently adjustable and combined via OR (a process
+  shows if it clears any one) to instantly narrow a busy process list down
+  to whatever's actually using resources — a combination not offered out
+  of the box by any of the platform-native tools this app draws on.
 - **End Process** with a confirmation dialog before anything is killed.
 - **Adjustable sample interval** (1s/2s/5s/10s) for the process list, plus a
   manual "Refresh Now".
@@ -185,6 +212,8 @@ on a typical Mac.
   the other common meaning of "AV interference" (synchronous file-scan
   latency from a minifilter driver), which would need a different,
   ETW-based mechanism.
+- Check Signature is Windows-only (Authenticode/WinVerifyTrust) — macOS has
+  an equivalent (codesign/Security.framework) but it isn't implemented yet.
 - End Process is a hard kill; no graceful-terminate or elevation flow yet.
 
 ## Building & running

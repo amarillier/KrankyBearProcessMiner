@@ -53,9 +53,9 @@ alongside each graph.
 
 PROCESS TABLE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• PID, Name, PPID, User, CPU%, Mem%, Memory, Disk R, Disk W, Private —
-  click a column header to sort by it, click again to reverse. Drag a
-  column boundary to resize it.
+• PID, Name, PPID, User, CPU%, Mem%, Memory, Disk R, Disk W, Private,
+  Handles — click a column header to sort by it, click again to reverse.
+  Drag a column boundary to resize it.
 • Memory shows actual physical memory in use (RSS -- Resident Set Size),
   the same figure Mem% is computed from, on all three platforms. In the
   Parent-processes view, both Mem% and Memory show the combined total
@@ -67,6 +67,13 @@ PROCESS TABLE:
   misleading rather than just incomplete). Either column reads N/A for a
   process owned by another user/system account, same as any other
   permission-restricted field.
+• Handles shows open handles on Windows, open file descriptors on macOS
+  and Linux — the same underlying idea on all three, and (unlike Private)
+  genuinely available everywhere: a single cheap syscall on every platform,
+  not a batch-per-tick concern. A count that climbs steadily and never
+  comes back down, even while the process otherwise looks idle, is a
+  classic sign of a handle/fd leak — worth watching if a process seems to
+  slowly degrade or eventually hang.
 • Long process names are ellipsized (…) to fit the Name column instead of
   overflowing into whatever's next to it.
 • Notable column (Windows): "🛡 <vendor>" for a process recognized as
@@ -78,9 +85,14 @@ PROCESS TABLE:
   a second look, though an unusual but legitimate launch path could also
   cause it. Blank for the overwhelming majority of rows.
 • Filter by name (top-left box), and/or narrow the list to actual resource
-  hogs with the "Top CPU" / "Top Mem" selects (Off / ≥1% / ≥5% / ≥10% /
-  ≥25%, independently adjustable) — a combination not offered out of the
-  box by any of the platform-native tools this app draws on.
+  hogs with "Top CPU" / "Top Mem" (Off / ≥1% / ≥5% / ≥10% / ≥25%), "Top
+  Memory" (Off / ≥100 MB / ≥500 MB / ≥1 GB / ≥4 GB — an absolute-size
+  complement to Top Mem's percentage, since 5% means something very
+  different on a 16GB laptop than a 128GB workstation), and "Top Disk"
+  (Off / ≥10 / ≥100 / ≥500 / ≥1000 KB/s), independently adjustable and
+  combined via OR — a process shows if it clears *any* one of the enabled
+  thresholds. A combination not offered out of the box by any of the
+  platform-native tools this app draws on.
 • "Regex" checkbox switches the name filter from a plain substring match
   to a real regexp match — e.g. ^(?i)(process|activity).* to compare just
   this app's own processes against Activity Monitor's, with nothing else
@@ -129,7 +141,11 @@ patched into an otherwise-legitimate module (e.g. ntdll.dll) — only
 injected code running outside any loaded module. macOS/Linux show just a
 thread count for now: resolving start addresses needs reading another
 process's memory, which needs privileges/entitlements neither platform
-grants a normal third-party app the way Windows does.
+grants a normal third-party app the way Windows does. Only one Threads
+window is ever open at a time — selecting a different process elsewhere
+(the main table, a Children window, Resource Details' Top Consumers) while
+it's open updates it to that process automatically instead of opening a
+second one.
 
 INTERFERENCE WATCH:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -196,6 +212,27 @@ a Bluetooth or device-enumeration API actually gets touched) -- normal
 behavior, not evidence of anything. The event log helps you build a sense
 of what's normal for a given process versus what's worth a second look.
 
+CHECK SIGNATURE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+A different angle on the same "trust but verify" idea as Thread Inspection
+and Interference Watch above, but aimed at the executable file itself
+rather than its runtime behavior: select a process and click "Check
+Signature" for a one-off Authenticode check of its on-disk .exe, Windows
+only. Three outcomes: ✓ signed with a certificate that chains to a trusted
+authority; ⚠ not signed at all (not necessarily malicious -- plenty of
+legitimate software, especially open-source or in-house tools, ships
+unsigned -- but worth a second look for something you don't recognize); or
+🛑 signed, but something's wrong (hash mismatch suggesting the file was
+modified after signing, an untrusted/self-signed certificate, an expired
+certificate, etc.). This also checks Windows' catalog-signing mechanism,
+not just an embedded signature -- most System32 binaries (e.g. notepad.exe)
+are catalog-signed rather than individually signed, so checking only for an
+embedded signature would flag a huge share of stock Windows as "unsigned."
+Revocation isn't checked (that would mean a network fetch per check,
+against this app's offline-first design elsewhere) -- this is a structural
+check (is it signed, does the chain lead to somewhere trusted), not a live
+"has this certificate been revoked since" verdict.
+
 RESIZABLE LAYOUT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Drag the divider between the process table and the detail pane, and the
@@ -217,7 +254,16 @@ Below the resource list, a Top Consumers panel shows the processes
 actually driving CPU, Memory, or Disk — name plus just that one metric —
 filtered by an adjustable threshold (Off / ≥1% / ≥5% / ≥10% / ≥25% for
 CPU/Mem; KB/s tiers for Disk), capped at 8 rows. Not available for
-Network — there's no per-process network API to draw from.
+Network — there's no per-process network API to draw from. Click a row to
+bring the main window forward with that process selected in the table.
+"Averaged over" (Off / 10s / 30s / 1 min / 2 min) ranks and filters by each
+process's average over that trailing window instead of just the latest
+sample — useful for a process that's a heavy consumer overall but bursty
+(e.g. spikes to 80% CPU for a second every few seconds), which a single
+instantaneous sample can just as easily catch mid-lull as mid-spike. The
+header shows which window (if any) is active, e.g. "Top CPU consumers (30s
+avg)". A brand-new process with no history yet still shows using its
+instantaneous value rather than being hidden.
 
 SYSTEM INFO WINDOW:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -269,6 +315,8 @@ KNOWN LIMITATIONS:
   relies on ETW tracing for per-process network) — the Top CPU/Mem filter
   is scoped accordingly for now.
 • No real "Private" memory figure on macOS (see PROCESS TABLE above).
+• Check Signature is Windows-only (Authenticode/WinVerifyTrust) — macOS has
+  an equivalent (codesign) but it isn't implemented yet.
 • End Process is a hard kill; no graceful-terminate or elevation flow yet.
 • Column widths aren't remembered across launches (only the split-pane
   divider positions and window size are) — Fyne's table widget has no way
