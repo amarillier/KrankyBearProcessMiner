@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "KrankyBearProcessMiner"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "Allan Marillier, 2025-"
 #define MyAppURL "https://github.com/amarillier/KrankyBearProcessMiner"
 #define MyAppExeName "KrankyBearProcessMiner.exe"

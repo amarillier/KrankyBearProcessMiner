@@ -18,6 +18,18 @@ feature set, on Windows, macOS, and Linux — no relearning a different tool (an
 a different set of column names, shortcuts, and quirks) every time you switch
 machines or OSes. One familiar interface instead of four.
 
+Sysinternals' Process Explorer and Process Monitor are still the gold standard
+for the deepest Windows-specific diagnostics — Process Explorer's handle/DLL
+search across every open handle, and Procmon's live real-time file/registry/
+network event stream with full call stacks, are both genuinely more capable
+than anything here (see **Known limitations** and the deferred
+"per-process open-handles/files window" idea in `ReleaseNotes.txt`). What this
+app adds instead: everyday cross-platform monitoring plus a growing set of
+Windows-specific "trust but verify" diagnostics (thread injection detection,
+Authenticode/catalog signature checks, and now ETW trace capture) that need
+nothing beyond this app and Windows Performance Analyzer — both free, no other
+install required.
+
 It's also built to stay out of the way of the very thing it's measuring: a
 monitoring tool that itself burns a large, constant share of CPU defeats the
 point. See **Lightweight by design** below.
@@ -64,26 +76,40 @@ point. See **Lightweight by design** below.
   Thread Inspection: watch one or a few chosen processes (or every process
   launched from a designated directory) and get an alert — a "⚠" that stays
   lit for as long as the condition persists, plus a logged event — the
-  moment any of three signs of interference appears on one of them, not
+  moment any of four signs of interference appears on one of them, not
   just in a one-off snapshot: a new UNBACKED thread (reflective injection,
   malware's usual technique for staying off the module list), a new module
   loading into the process (the technique legitimate AV/EDR hooking
-  actually uses instead, since it wants its DLL visible), or a thread's
+  actually uses instead, since it wants its DLL visible), a thread's
   stack containing a pointer into a third-party module — a coarse
   approximation of manually "thread stacking" in Process Explorer, and
   unlike the other two, not relative to a baseline: it can find evidence of
   a hook that was already there before you started watching, right on the
   first check, since it scans a thread's whole stack region rather than
-  just what changed. A hit against a short, best-effort known-vendor list
-  gets a friendly label; an unmatched one is still reported, just without
-  one. Deliberately not "watch everything": AV/security software should be
-  scanning regardless, this is for verifying specific exclusions. Adding a
-  watch opens (or focuses) the Interference Watch window itself, so results
-  are never more than one click away; the View/Process menu and tray's
-  "Check for Interference" opens the same window any other time. It lists
-  what's being watched — each with an at-a-glance "✓"/"⚠"/"🛑" status — and
-  the event log (same icons, same meaning), with Copy to Clipboard and
-  Clear. All three signals are Windows-only — see **Known limitations**.
+  just what changed — or (elevated only) Windows Defender's own real-time
+  minifilter scanning a file the process opens, live, via a real ETW
+  subscription — the *other* meaning of "AV interference" (synchronous
+  file-scan latency), which the other three can't see at all since they
+  only look at what's happening *inside* the watched process itself. That
+  fourth signal is always shown as a plain "⚠", never "🛑" — Defender doing
+  its job is expected, not an accusation, and (unlike the other three)
+  there's no baseline concept since a file scan is a momentary event, not
+  a persistent condition. Confirmed via real-world testing that it never
+  fires for a trusted/Microsoft-signed process (Notepad specifically) —
+  Defender fast-tracks those through a different code path — so a
+  Defender trust-evaluation registration (no file path, just "Defender is
+  aware of this process") is logged as a fallback for exactly that case.
+  A hit against a short, best-effort known-vendor
+  list gets a friendly label; an unmatched one is still reported, just
+  without one. Deliberately not "watch everything": AV/security software
+  should be scanning regardless, this is for verifying specific
+  exclusions. Adding a watch opens (or focuses) the Interference Watch
+  window itself, so results are never more than one click away; the
+  View/Process menu and tray's "Check for Interference" opens the same
+  window any other time. It lists what's being watched — each with an
+  at-a-glance "✓"/"⚠"/"🛑" status — and the event log (same icons, same
+  meaning), with Copy to Clipboard and Clear. All four signals are
+  Windows-only — see **Known limitations**.
 - **Check Signature** — a different angle on the same trust-but-verify idea,
   aimed at the executable file itself rather than its runtime behavior:
   select a process and click "Check Signature" for a one-off Authenticode
@@ -95,6 +121,26 @@ point. See **Lightweight by design** below.
   than individually signed, so checking only for an embedded one would flag
   a huge share of stock Windows as "unsigned." No revocation check (would
   mean a network fetch per check) — a structural check, not a live verdict.
+- **Capture Trace** — Windows-only. Records an ETW trace to a .etl file via
+  Windows Performance Recorder (`wpr.exe`, built into Windows, no separate
+  install) — four checkboxes for real WPR profiles (Network, Disk I/O, File
+  I/O, Minifilter — the last being the *other* meaning of "AV interference,"
+  a security product's filter driver intercepting file I/O, which
+  Interference Watch's own three signals can't see), Start, then Stop &
+  Save or Cancel. Deliberately not a trace *analyzer* — open the result in
+  Windows Performance Analyzer (WPA) instead; see **Known limitations**.
+  Needs Administrator rights (confirmed by testing — these are all
+  kernel-level tracing providers); opening this window without them shows
+  an explanation and a "Relaunch as Administrator" button (a UAC prompt,
+  no need to close this instance first — see **Single-instance
+  enforcement** below) instead of the controls, rather than letting you
+  click through to a Start failure. An elevated window's title bar says
+  so ("Administrator: KrankyBear ProcessMiner"), Windows' own convention
+  for elevated console windows. While saving, the status line turns red
+  and warns against exiting ProcessMiner until it finishes — confirmed for
+  real that this matters: exiting mid-save corrupts the .etl (WPA refused
+  to open the result). Exiting can't be blocked outright, so this is the
+  mitigation.
 - **Resizable, persisted layout** — drag the divider between the process table
   and the detail pane, and between the detail info and its children list; both
   positions are remembered across launches, along with the main window size.
@@ -144,12 +190,22 @@ point. See **Lightweight by design** below.
   manual "Refresh Now".
 - **Hide All / Show All windows**, with an **Alt+H** boss-key hotkey (mirrored
   in the Window menu and system tray) to instantly hide the main window and
-  any open About/Help/Update windows together, and bring back exactly that
-  same set later.
+  every other open window together (About/Help/Update, System Info, Resource
+  Details, Interference Watch, a Children drill-down, a Threads window), and
+  bring back exactly that same set later.
 - **Single-instance enforcement** — launching a second copy shows a small
   "already running" window with a Quit button rather than opening a second
   full instance (no cross-process IPC, no bringing the first instance's
-  window to the foreground — deliberately simple).
+  window to the foreground — deliberately simple). On Windows, one specific
+  exception: a second copy is allowed if its elevation differs from the
+  first's (one normal + one elevated, either order) — added so Capture
+  Trace's admin-rights requirement doesn't force fully quitting and
+  relaunching every time you want to record a trace. Two of the same
+  elevation level still isn't allowed. The "already running" window is its
+  own separate process with no connection to the instance(s) it's naming,
+  so closing those doesn't close it directly — it notices within a couple
+  of seconds (polling, not real IPC) and closes itself once the instance
+  it was blocking is gone, rather than sitting around as a leftover.
 - **Tooltips** on column headers, buttons, checkboxes, and selects throughout
   the app (via [dweymouth/fyne-tooltip](https://github.com/dweymouth/fyne-tooltip),
   since Fyne itself has no built-in tooltip support yet) — hover to see what
@@ -174,9 +230,22 @@ on a typical Mac.
 
 ## Cross-platform support
 
+
 - **Linux**: GNOME, KDE, XFCE, Cinnamon, MATE, etc. on X11 or Wayland.
 - **macOS**: 10.13 (High Sierra) or later.
-- **Windows**: Windows 10 or later.
+- **Windows**: Windows 10 or later. Some VMs and locked-down hosts have no
+  usable hardware OpenGL, which most Fyne apps otherwise crash or hang on
+  with no explanation — ProcessMiner automatically probes for it at launch and,
+  only if that fails, falls back to a bundled Mesa3D software renderer and
+  relaunches itself, with no user action needed. Real hardware OpenGL is
+  always preferred when available (it's faster); nothing changes on a
+  normal machine with a working GPU. The installer bundles this fallback
+  automatically. The **portable (zip) Windows build does not** — if you're
+  running the portable version on a machine without hardware OpenGL, grab
+  `mesa-fallback.zip` from the same release, extract it into a
+  `mesa-fallback` folder next to `KrankyBearProcessMiner.exe`, and the same
+  automatic fallback applies. Most users on a normal machine will never
+  need this file at all.
 
 ## Known limitations
 
@@ -184,7 +253,27 @@ on a typical Mac.
   Windows' own Task Manager relies on ETW tracing for this) and no
   per-process GPU usage yet — the "Top CPU"/"Top Mem" consumer filter is
   scoped accordingly for now (Disk R/W are shown as columns but not yet a
-  filterable threshold).
+  filterable threshold). **Capture Trace** (Windows-only, see Features
+  above) covers the "record the raw ETW data" half of closing this gap. A
+  live, in-app ETW consumer now exists too (`github.com/tekert/goetw`,
+  pure Go, no CGO — feeding Interference Watch's 4th signal, see Features),
+  but it isn't wired up to network usage or disk I/O latency yet: those
+  turn out to need the classic, MOF-based "NT Kernel Logger" mechanism
+  (confirmed empirically — inspecting a live WPR session's kernel-level
+  provider GUIDs shows ones even `wevtutil` can't resolve to a friendly
+  name), a materially different and more special-cased API than the
+  modern manifest-based providers the 4th signal uses, and not something
+  to commit to without further dedicated research — a separate,
+  not-yet-started effort. Deliberately not a trace *analyzer* either —
+  Microsoft's own Windows Performance Analyzer (WPA, free — via the
+  Microsoft Store or the Windows ADK's "Windows Performance Toolkit"
+  component) already does deep .etl analysis well; everyone on Windows
+  already has access to it, and matching even a fraction of its depth
+  inside a monitoring tool would be a second product, not a complementary
+  feature. Open a saved capture directly in WPA (double-click the .etl, or
+  `wpa.exe <file>.etl`) for the full trace-level view — graphs, tables, and
+  stacks well beyond what a live process monitor's own view reasonably
+  shows.
 - No real "Private" memory figure on macOS — the closest gopsutil provides
   there is reserved virtual address space (often >1TB for a browser
   renderer), not actual private memory, so this app shows N/A rather than a
@@ -208,12 +297,18 @@ on a typical Mac.
   `ntdll.dll` — that's a separate, bigger piece of work, not implemented.
   Interference Watch inherits the same Windows-only constraint — the watch
   list can still be built on macOS/Linux, but nothing will ever be flagged
-  there. It also only covers *code injection* into a watched process, not
-  the other common meaning of "AV interference" (synchronous file-scan
-  latency from a minifilter driver), which would need a different,
-  ETW-based mechanism.
+  there. Three of its four signals only cover *code injection* into a
+  watched process; the fourth (Defender's own AMFilter minifilter scanning
+  a file the process opens, via a live ETW subscription) covers the other
+  common meaning of "AV interference" (synchronous file-scan latency), but
+  needs Administrator rights to create that subscription at all — silently
+  inert if not running elevated, same as the other three are silently
+  inert on macOS/Linux.
 - Check Signature is Windows-only (Authenticode/WinVerifyTrust) — macOS has
   an equivalent (codesign/Security.framework) but it isn't implemented yet.
+- Capture Trace needs Administrator rights (confirmed by testing — all four
+  of its WPR profiles are kernel-level) and there's no in-app elevation
+  prompt yet — relaunch ProcessMiner as Administrator first.
 - End Process is a hard kill; no graceful-terminate or elevation flow yet.
 
 ## Building & running

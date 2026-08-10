@@ -100,7 +100,7 @@ func showInterferenceWindow(a fyne.App, watcher *interferenceWatcher, onWatchLis
 
 	var banner *widget.Label
 	if threadStartAddressSupported {
-		banner = widget.NewLabel("Watches selected processes and/or directories for three signs of " +
+		banner = widget.NewLabel("Watches selected processes and/or directories for four signs of " +
 			"interference: a thread starting outside any loaded module (\"UNBACKED\" -- reflective " +
 			"injection, malware's usual technique for staying off the module list) or a new module " +
 			"(DLL) loading in (the technique legitimate AV/EDR hooking actually uses instead) are " +
@@ -109,7 +109,14 @@ func showInterferenceWindow(a fyne.App, watcher *interferenceWatcher, onWatchLis
 			"on the very first check, since that's evidence of something that may already have been " +
 			"happening -- a coarse approximation of the classic \"thread stacking\" technique, not " +
 			"true call-stack unwinding, so treat a hit as worth confirming with Process Explorer/" +
-			"Procmon, not proof on its own. Select a process in the main table and click \"Watch for " +
+			"Procmon, not proof on its own. The fourth -- Windows Defender's own AMFilter minifilter " +
+			"scanning a file the process opens, the *other* meaning of \"AV interference\" the other " +
+			"three can't see -- only shows up when running elevated (Administrator), and is always " +
+			"shown as a plain \"⚠\" rather than \"🛑\" since it's expected, legitimate behavior, not an " +
+			"accusation. Trusted/Microsoft-signed processes (e.g. Notepad) skip that scan event " +
+			"entirely, so a Defender trust-evaluation registration is logged as a fallback for those -- " +
+			"a different, narrower claim (\"Defender is aware of this process\", no file path) than an " +
+			"actual file scan. Select a process in the main table and click \"Watch for " +
 			"Interference\" to add it here, or add a whole directory below (any process launched from " +
 			"it is watched automatically).")
 	} else {

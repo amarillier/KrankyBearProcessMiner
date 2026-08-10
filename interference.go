@@ -27,6 +27,12 @@ import (
 // drives check() from recompute(), itself only ever called from an
 // already-fyne.Do-wrapped snapshot callback or a direct widget callback), so
 // no mutex is needed -- same reasoning as procViewState's own doc comment.
+// Still true even with the 4th signal (EventAVFileScan): its data arrives
+// from a genuinely separate goroutine (the ETW consumer callback in
+// avmonitor_windows.go), but that goroutine never touches this struct
+// directly -- it only writes to globalAVScanRelay (avmonitor.go), a small,
+// separately-synchronized handoff point that check() drains on the main
+// goroutine, same as everything else here.
 type interferenceWatcher struct {
 	pids map[int32]string // explicitly watched PID -> process name at watch time (for display; exited processes may not resolve a name any other way)
 	dirs []string         // watched directories, normalized (trailing separator) -- see normalizeWatchDir
@@ -221,12 +227,36 @@ func (w *interferenceWatcher) check(byPID map[int32]ProcInfo) map[int32]bool {
 	flagged := make(map[int32]bool)
 	w.prune(byPID)
 
-	if !threadStartAddressSupported || !w.hasWatches() {
+	if !w.hasWatches() {
 		return flagged
 	}
 
 	targets := w.activeTargets(byPID)
 	if len(targets) == 0 {
+		return flagged
+	}
+
+	// Fourth detection path: Defender's AMFilter minifilter reporting on a
+	// watched process's file activity or trust status -- genuinely
+	// independent of threadStartAddressSupported (it needs Administrator +
+	// a live ETW consumer, not thread/module introspection; see
+	// avmonitor_windows.go), so it has to run before that gate below, not
+	// after -- an earlier version of this function checked
+	// threadStartAddressSupported before this block even though this
+	// signal doesn't depend on it at all, which would have skipped it
+	// entirely on a hypothetical platform where that flag is false but AV
+	// monitoring isn't -- caught during real-world testing, not by
+	// inspection. Inert by construction wherever startAVMonitor never
+	// actually got a session running (non-Windows, or not elevated) --
+	// there's simply never anything sitting in the relay to drain.
+	globalAVScanRelay.setWatchedPIDs(targets)
+	for _, sighting := range globalAVScanRelay.drain() {
+		if w.checkAVFileScan(sighting, byPID[sighting.pid].Name) {
+			flagged[sighting.pid] = true
+		}
+	}
+
+	if !threadStartAddressSupported {
 		return flagged
 	}
 
@@ -446,6 +476,36 @@ func (w *interferenceWatcher) checkStackForeignModules(pid int32, name string, s
 	return len(flaggedSet) > 0
 }
 
+// checkAVFileScan implements the fourth detection path: Windows Defender's
+// own AMFilter minifilter reporting on pid -- either a real file-scan
+// interception (EventAVFileScan, the *other* meaning of "AV interference"
+// the other three signals can't see since they only look at what's
+// happening *inside* the watched process itself) or, when Defender fast-
+// tracked pid through its trusted-process path instead of ever scanning a
+// specific file (confirmed with notepad.exe -- see EventAVTrustEval's doc
+// comment), a trust-evaluation registration. See avmonitor_windows.go for
+// how sightings actually get here (an async ETW consumer goroutine,
+// relayed through globalAVScanRelay -- this method itself still only ever
+// runs on the main goroutine, from check()).
+//
+// Unlike the other three signals, there's no baseline or "still ongoing"
+// state to track: both of these are momentary events, not a persistent
+// condition like a loaded module or a live thread, so every sighting is
+// logged unconditionally and the returned bool only reflects *this* cycle
+// -- naturally stops being true the next tick if nothing new arrived,
+// rather than staying sticky.
+func (w *interferenceWatcher) checkAVFileScan(sighting avScanSighting, name string) bool {
+	kind := EventAVFileScan
+	if sighting.trustEval {
+		kind = EventAVTrustEval
+	}
+	w.events = append(w.events, InterferenceEvent{
+		When: time.Now(), PID: sighting.pid, ProcessName: name, Kind: kind,
+		FilePath: sighting.fileName,
+	})
+	return true
+}
+
 // ownExeDirFor returns the directory containing pid's own executable
 // (cached via exeCache, resolved at most once per pid's lifetime -- the
 // same cache activeTargets uses for directory-watch matching, now also
@@ -560,14 +620,20 @@ var knownSecurityModules = map[string]string{
 	"msmpeng":        "Microsoft Defender",
 	"mpdefender":     "Microsoft Defender",
 	"windefend":      "Microsoft Defender",
-	"mbamservice":    "Malwarebytes",
-	"mbamtray":       "Malwarebytes",
-	"ekrn":           "ESET",
-	"egui":           "ESET",
-	"avpsvc":         "Kaspersky",
-	"kavfs":          "Kaspersky",
-	"bdagent":        "Bitdefender",
-	"vsserv":         "Bitdefender",
+	// mpclient/mpoav found in the wild during this feature's own real-world
+	// testing: a thread-stack scan hit against one of a watched Chrome
+	// child process's threads, right as a download was being scanned --
+	// MpOav.dll is literally Defender's on-access-scan module.
+	"mpclient":    "Microsoft Defender",
+	"mpoav":       "Microsoft Defender",
+	"mbamservice": "Malwarebytes",
+	"mbamtray":    "Malwarebytes",
+	"ekrn":        "ESET",
+	"egui":        "ESET",
+	"avpsvc":      "Kaspersky",
+	"kavfs":       "Kaspersky",
+	"bdagent":     "Bitdefender",
+	"vsserv":      "Bitdefender",
 }
 
 // matchKnownSecurityModule returns a friendly vendor label if modName
@@ -595,9 +661,17 @@ func matchKnownSecurityModule(modName string) string {
 //     it's attributable and expected in kind, if not necessarily in
 //     degree), and "danger" when unmatched (unknown code is the case that
 //     most needs a closer look).
+//   - EventAVFileScan/EventAVTrustEval are always "warning," never
+//     "danger": Defender scanning or evaluating a watched process is
+//     expected, legitimate behavior in a way an unbacked thread never is
+//     -- these signals exist to make that activity visible, not to
+//     accuse it.
 func interferenceEventSeverity(e InterferenceEvent) (icon string, isDanger bool) {
 	if e.Kind == EventUnbackedThread {
 		return "🛑", true
+	}
+	if e.Kind == EventAVFileScan || e.Kind == EventAVTrustEval {
+		return "⚠", false
 	}
 	if e.KnownVendor != "" {
 		return "⚠", false
@@ -618,6 +692,10 @@ func formatInterferenceEvent(e InterferenceEvent) string {
 			return fmt.Sprintf("%s — %s (PID %d), TID %d: possible %s module in thread stack: %s", when, e.ProcessName, e.PID, e.TID, e.KnownVendor, e.ModuleName)
 		}
 		return fmt.Sprintf("%s — %s (PID %d), TID %d: unrecognized third-party module in thread stack: %s (verify with Process Explorer/Procmon)", when, e.ProcessName, e.PID, e.TID, e.ModuleName)
+	case EventAVFileScan:
+		return fmt.Sprintf("%s — %s (PID %d): Windows Defender scanned a file this process opened: %s", when, e.ProcessName, e.PID, e.FilePath)
+	case EventAVTrustEval:
+		return fmt.Sprintf("%s — %s (PID %d): Windows Defender registered this process for trust evaluation (no specific file scan seen -- common for trusted/Microsoft-signed processes, which skip the full file-scan event path)", when, e.ProcessName, e.PID)
 	default: // EventUnbackedThread
 		return fmt.Sprintf("%s — %s (PID %d), TID %d: %s", when, e.ProcessName, e.PID, e.TID, e.StartAddr)
 	}

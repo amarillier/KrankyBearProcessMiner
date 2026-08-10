@@ -159,7 +159,7 @@ for Interference" opens the same window any other time. It also lets you
 watch a whole directory — any process launched from it is watched
 automatically, without re-selecting it every time it restarts.
 Every process-list sample (same 1-10s interval as the main table), each
-watched process is checked for three signs of interference:
+watched process is checked for four signs of interference:
 • A thread with an "UNBACKED" start address that wasn't there the *first*
   time it was checked — reflective injection (raw shellcode, no module
   ever loaded), the technique malware uses specifically to stay off the
@@ -181,6 +181,33 @@ watched process is checked for three signs of interference:
   matches a short, best-effort known-vendor list, the event names the
   likely vendor; otherwise it's reported as an unrecognized third-party
   module — still worth investigating, just without a friendly label.
+• Windows Defender's own real-time-protection minifilter (AMFilter)
+  intercepting a file the watched process opens — the *other* meaning of
+  "AV interference" (synchronous file-scan latency), which the other three
+  signals can't see at all since they only look at what's happening
+  *inside* the watched process itself. Unlike the other three, this one
+  needs a live, real-time ETW subscription, which needs Administrator
+  rights to create at all (see WINDOW MANAGEMENT below for the
+  one-normal-plus-one-elevated exception to the single-instance rule, and
+  CAPTURE TRACE below for the same requirement) — silently just doesn't
+  show up if not running elevated, same as the other three simply don't
+  show up on macOS/Linux.
+  Always shown as "⚠", never "🛑": Defender scanning a file your watched
+  process opened is expected, legitimate behavior, not something to flag
+  as alarming — this signal exists to make it visible, not to accuse it.
+  Confirmed via real-world testing that this specific signal never fires
+  at all for a well-known, Microsoft-signed "trusted" process (Notepad: no
+  file-scan event despite a completed Save, while Defender's own trust
+  bookkeeping fired reliably for other processes at the same moment) —
+  Defender appears to fast-track trusted processes through a different
+  code path that skips the file-scan event entirely. There's a fallback
+  for exactly this: a process being registered for Defender's own trust
+  evaluation is also logged (no file path — just "this process is being
+  evaluated," a different claim than "this file was scanned"), so a
+  trusted process still shows *something* rather than going silent.
+  Also, unlike the other three, there's no baseline/persistence concept: a
+  file scan is a momentary event, so it's logged every time it happens
+  while watching, not just the first time or only while "still ongoing."
 For the first two signals, whatever was already present *before* you
 started watching is treated as the baseline, not reported, so watching an
 unusual-but-legitimate process doesn't immediately cry wolf. A "⚠" appears
@@ -199,12 +226,11 @@ based on a best-effort name match, not a certified verdict either way —
 directory watches don't get a status icon (attributing a directory's
 history back to it reliably isn't worth the added complexity for a glance
 indicator), just a plain listing.
-All three signals are Windows-only — on macOS/Linux the watch list can
+All four signals are Windows-only — on macOS/Linux the watch list can
 still be built but nothing will ever be flagged (the button and "Add
-Directory" say so).
-None of the three detects the *other* common meaning of "AV interference,"
-synchronous file-scan latency from a minifilter driver intercepting file
-I/O, which needs a different, ETW-based mechanism not implemented here.
+Directory" say so). The file-scan signal specifically also needs
+Administrator rights (see above) — the other three work the same either
+way.
 Expect some genuinely benign "new module loaded" events: browsers and other
 large apps delay-load Windows OS components on demand well after startup
 (e.g. Windows.Devices.Bluetooth.dll/BthRadioMedia.dll appearing the moment
@@ -232,6 +258,41 @@ Revocation isn't checked (that would mean a network fetch per check,
 against this app's offline-first design elsewhere) -- this is a structural
 check (is it signed, does the chain lead to somewhere trusted), not a live
 "has this certificate been revoked since" verdict.
+
+CAPTURE TRACE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Windows-only, via the View menu or tray. Records an ETW (Event Tracing for
+Windows) trace to a .etl file using Windows Performance Recorder (wpr.exe,
+built into Windows -- no separate install). Four checkboxes, checked by
+default, each a real WPR profile: Network (per-process send/receive
+activity), Disk I/O (per-process disk activity including latency, not just
+the throughput this app's own Disk R/W columns show), File I/O (which files,
+not just how many bytes), and Minifilter (a security product's filter
+driver intercepting file I/O -- the *other* meaning of "AV interference"
+Interference Watch's own three signals can't see). Click Start, do whatever
+you're trying to capture, then Stop && Save to a .etl file -- Cancel
+discards it instead. A short capture can still produce a large file (one
+real test: ~700MB for well under a minute with Network+File I/O alone), so
+watch disk space for a longer one. While saving, the status line turns red
+and says not to exit ProcessMiner until it finishes -- take that literally:
+exiting mid-save corrupts the .etl (confirmed for real -- WPA refused to
+open the result). This app does not analyze the trace
+itself -- open the saved .etl in Windows Performance Analyzer (WPA), free
+via the Microsoft Store or the Windows ADK's "Windows Performance Toolkit"
+component; see Known Limitations for why a built-in analyzer isn't planned.
+Needs Administrator rights -- these are all kernel-level tracing providers.
+Opening this window without them shows an explanation and a "Relaunch as
+Administrator" button instead of the checkboxes/buttons, rather than
+letting you click through to a Start failure -- click it for a UAC prompt
+and a second, elevated copy, no need to close this one first (see WINDOW
+MANAGEMENT below for the one-normal-plus-one-elevated exception to the
+usual single-instance rule). Declining the UAC prompt is a normal choice,
+not an error -- nothing happens, no error dialog. An elevated window's
+title bar says so ("Administrator: KrankyBear ProcessMiner"), same
+convention Windows' own elevated console windows use. The one realistic
+Start failure that can
+still happen even elevated is a stale capture left running by an earlier
+crash -- Cancel clears that.
 
 RESIZABLE LAYOUT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -282,11 +343,25 @@ tool), so the delay is expected, not a hang.
 WINDOW MANAGEMENT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Hide All / Show All (Window menu or system tray) hides the main window and
-any open About/Help/Update windows together, then brings back exactly
-that same set later. Alt+H is a boss-key hotkey for Hide All — there's no
-matching Show hotkey by design; reveal via the Window menu or tray instead.
+every other currently-open window together (About/Help/Update, System
+Info, Resource Details, Interference Watch, a Children drill-down, a
+Threads window), then brings back exactly that same set later. Alt+H is a
+boss-key hotkey for Hide All — there's no matching Show hotkey by design;
+reveal via the Window menu or tray instead.
 Only one instance of this app runs at a time — launching a second copy
-shows a small "already running" window with a Quit button instead.
+shows a small "already running" window with a Quit button instead. On
+Windows, one exception: a second copy at a *different* elevation level
+(one normal + one elevated) is allowed, specifically so Capture Trace's
+admin-rights requirement doesn't force fully quitting and relaunching every
+time. Two at the same elevation level still isn't allowed. An elevated
+instance's title bar (every window, not just the main one) is prefixed
+"Administrator:", the same convention Windows' own elevated console windows
+use, so it's always visible at a glance which one you're looking at. The
+"already running" window is its own separate process with no connection to
+whichever instance(s) it's complaining about, so closing those doesn't
+close it directly -- it notices on its own within a couple of seconds
+(polling, not real IPC) and closes itself once the instance it was
+blocking is no longer there, rather than sitting around as a leftover.
 
 SMART FEATURES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -313,10 +388,24 @@ KNOWN LIMITATIONS:
 • No per-process network usage or GPU usage on any platform yet — no
   platform offers a simple API for either (Windows' own Task Manager
   relies on ETW tracing for per-process network) — the Top CPU/Mem filter
-  is scoped accordingly for now.
+  is scoped accordingly for now. Capture Trace (Windows-only) can record
+  the raw ETW data for per-process network/disk/file activity to a .etl
+  for analysis in WPA, but nothing from a capture feeds back into this
+  app's own live view -- that would need a real-time ETW consumer, a much
+  bigger separate effort, not implemented.
 • No real "Private" memory figure on macOS (see PROCESS TABLE above).
-• Check Signature is Windows-only (Authenticode/WinVerifyTrust) — macOS has
-  an equivalent (codesign) but it isn't implemented yet.
+• Check Signature and Capture Trace are both Windows-only (Authenticode/
+  WinVerifyTrust, and wpr.exe/ETW respectively) — macOS has a Check
+  Signature equivalent (codesign) but it isn't implemented yet.
+• Capture Trace needs Administrator rights (confirmed by testing — all
+  four of its profiles are kernel-level) and there's no in-app elevation
+  prompt yet — relaunch ProcessMiner as Administrator first.
+• No built-in ETW trace viewer/analyzer, and none planned: Windows
+  Performance Analyzer (WPA) already does this well, and everyone on
+  Windows already has free access to it (Microsoft Store, or the Windows
+  ADK's "Windows Performance Toolkit" component) — matching even a
+  fraction of its depth here would be a second product, not a
+  complementary feature to a live process monitor.
 • End Process is a hard kill; no graceful-terminate or elevation flow yet.
 • Column widths aren't remembered across launches (only the split-pane
   divider positions and window size are) — Fyne's table widget has no way

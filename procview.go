@@ -44,7 +44,7 @@ type procColumn struct {
 }
 
 var procColumns = []procColumn{
-	{"⚠", sortAlert, 30, "Interference Watch: flags a process where a thread appeared with no backing module, a new module loaded, or a thread's stack contains a third-party module -- see Interference Watch window for details. Select a process and click \"Watch for Interference\" to add it."},
+	{"⚠", sortAlert, 30, "Interference Watch: flags a process where a thread appeared with no backing module, a new module loaded, a thread's stack contains a third-party module, or Windows Defender scanned a file it opened (elevated only) -- see Interference Watch window for details. Select a process and click \"Watch for Interference\" to add it."},
 	{"PID", sortPID, 70, "Process ID"},
 	{"Name", sortName, 220, "Process/executable name"},
 	{"PPID", sortPPID, 70, "Parent process ID"},
@@ -97,6 +97,14 @@ const (
 	defaultMainSplit      = 0.7
 	defaultDetailSplit    = 0.4
 )
+
+// childDrilldownWindow/-Open mirror the state windows.go's hide-all/show-all
+// cares about, same reasoning as resourceview.go's resourceDetailWindow/
+// -Open: the window itself is owned by procViewState.childWin, but that's
+// private state with no other package-level hook for windows.go to reach
+// into. Kept in sync at every place childWin is built, shown, or closed.
+var childDrilldownWindow fyne.Window
+var childDrilldownOpen bool
 
 func clampSplitOffset(v float64) float64 {
 	switch {
@@ -330,7 +338,7 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	st.threadsBtn.SetToolTip("One-off snapshot of the selected process's threads, including start-address resolution on Windows (see Help)")
 	st.threadsBtn.Disable()
 	st.watchBtn = ttwidget.NewButton("Watch for Interference", st.toggleWatchSelected)
-	st.watchBtn.SetToolTip("Add the selected process to Interference Watch -- an unbacked thread, a new module, or a third-party module found in a thread's stack all flag it and get logged automatically")
+	st.watchBtn.SetToolTip("Add the selected process to Interference Watch -- an unbacked thread, a new module, a third-party module found in a thread's stack, or (elevated only) a Defender file scan all flag it and get logged automatically")
 	st.watchBtn.Disable()
 	if !threadStartAddressSupported {
 		// Inert on this platform (see interference.go) -- disabled
@@ -1131,6 +1139,7 @@ func (st *procViewState) showChildWindow(p ProcInfo) {
 	}
 
 	st.refreshChildWindow()
+	childDrilldownOpen = true
 	st.childWin.Show()
 	st.childWin.RequestFocus()
 }
@@ -1138,6 +1147,7 @@ func (st *procViewState) showChildWindow(p ProcInfo) {
 func (st *procViewState) buildChildWindow() {
 	st.childWin = st.app.NewWindow("")
 	st.childWin.SetIcon(resourceKrankyBearProcessMinerPng)
+	childDrilldownWindow = st.childWin
 
 	st.childWinTable = widget.NewTable(
 		func() (int, int) { return len(st.childWinDisplayRows), len(procColumns) },
@@ -1175,6 +1185,8 @@ func (st *procViewState) buildChildWindow() {
 	st.childWin.SetOnClosed(func() {
 		fynetooltip.DestroyWindowToolTipLayer(st.childWin.Canvas())
 		st.childWin = nil
+		childDrilldownWindow = nil
+		childDrilldownOpen = false
 		st.childWinPID = -1
 		st.childWinSelectedPID = -1
 		st.childWinFilterText = ""
@@ -1193,12 +1205,12 @@ func (st *procViewState) refreshChildWindow() {
 	}
 	parent, ok := st.byPID[st.childWinPID]
 	if !ok {
-		st.childWin.SetTitle("(process exited)")
+		st.childWin.SetTitle(adminTitlePrefix() + "(process exited)")
 		st.childWinAllRows = nil
 		st.recomputeChildWinRows()
 		return
 	}
-	st.childWin.SetTitle(fmt.Sprintf("%s (PID %d) — Children", parent.Name, parent.PID))
+	st.childWin.SetTitle(fmt.Sprintf("%s%s (PID %d) — Children", adminTitlePrefix(), parent.Name, parent.PID))
 	st.childWinAllRows = childrenOf(st.byPID, st.childWinPID)
 	st.recomputeChildWinRows()
 }

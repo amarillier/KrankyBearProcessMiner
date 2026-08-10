@@ -10,6 +10,7 @@ require (
 	github.com/hashicorp/go-version v1.3.0
 	github.com/mdlayher/wifi v0.9.0
 	github.com/shirou/gopsutil/v4 v4.26.7
+	github.com/tekert/goetw v0.9.11
 	golang.org/x/sys v0.47.0
 )
 
@@ -41,6 +42,7 @@ require (
 	github.com/mdlayher/socket v0.6.0 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.5.1 // indirect
+	github.com/phuslu/log v1.0.120 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect

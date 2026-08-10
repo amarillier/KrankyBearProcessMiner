@@ -4,9 +4,11 @@ KrankyBear ProcessMiner -- cross-platform (Windows, Linux, macOS) process/system
 Future ideas:
 - Persist watched processes/directories in Preferences across launches, with a reactivation flow at startup (see/choose to reactivate, edit, or leave disabled). Bigger than it first looks: PIDs aren't meaningful across a restart, so a process watch would need to persist by *name* (or exe path) instead and re-match against whatever's actually running next launch -- straightforward for directory watches (just the path), needs real design for process watches (what if two processes share a name? what if it never comes back?). The auto-open/focus half of this same idea shipped already (see 0.3.0 below); this is just the persistence/reactivation half.
 
-- ETW-based work (bigger investment, biggest payoff) — this is the one I'd actually prioritize if you want the next big leap: consuming Event Tracing for Windows unlocks three things this app already documents as gaps in one shot — real per-process network usage, real per-process I/O latency (not just throughput), and the minifilter file-scan interference detection I flagged as missing last time. It's a materially bigger piece of plumbing than anything shipped so far, but it's the same investment that pays for all three rather than three separate efforts.
+- ETW-based work, Phase 2 continued: real per-process network usage and I/O latency -- the minifilter/AV-interference third of Phase 2 shipped AND is confirmed fully working in 0.5.0 (Interference Watch's 4th signal + trust-eval fallback, verified end-to-end against real Chrome/Notepad activity, not just a synthetic spike -- see 0.5.0 below), and turned out not to need any hand-rolled StartTrace/TDH bindings after all -- github.com/tekert/goetw (pure Go, no CGO) already wraps that, and the relevant providers (Microsoft-Antimalware-*) are modern and well-documented. Network usage and disk I/O latency are the genuinely hard remainder, still not started: confirmed empirically this round that WPR's Network/DiskIO profiles pull from the classic, MOF-based "NT Kernel Logger" mechanism instead (unnamed provider GUIDs even wevtutil can't resolve to a friendly name) -- a materially different, more special-cased API (SystemTraceControlGuid + EnableFlags bitmasks, not EnableTraceEx2-by-provider-GUID) with unconfirmed support even in goetw (which does expose NewKernelRealTimeSession/NewSystemTraceSession -- worth checking first, not assumed either way).
 
 - Per-process open-handles/files window (listing each individual open handle/fd with what it actually points to, not just the count the Handles column already shows) -- promoted here from "some day maybe" after real use: the 0.4.0 Handles column immediately surfaced a process with a surprisingly high count, which the count alone can't explain -- you need the list of *what* to actually debug it. Feasibility is uneven across platforms, though: Linux is easy (/proc/[pid]/fd already resolves each entry to a path); macOS is moderate (the same proc_pidinfo call the count uses can list each fd, and proc_pidfdinfo/PROC_PIDFDVNODEPATHINFO resolves file-backed ones to a path, no root needed for your own processes); Windows is the hard one -- undocumented NtQuerySystemInformation(SystemHandleInformation) plus per-handle NtQueryObject name resolution, and querying certain handle types (notably a named pipe with no listener) can hang, needing a timeout/worker-thread workaround. Comparable in size to the thread-list/stack-scan work already shipped, not a quick add.
+
+- User option show additional column for signed or unsigned processes with a simple icon, or unicode checkmark, whatever is lowest resource use? Maybe minimize impact by performing background check after launch and populate as possible, and when new processes are detected. Maybe not that valuable, but signed vs unsigned might also be useful in troubleshooting if not a substantial burden. Recognizing this is Windows only with authenticode.
 
 
 Some day maybe, maybe never - defer for now
@@ -14,7 +16,204 @@ Some day maybe, maybe never - defer for now
 - GPU resource use - Windows only since not readily available for Mac/Linux, maybe some day if we perceive value
 - Process CPU affinity / priority controls -- scrapped rather than deferred: affinity has no real macOS support at all (Apple's affinity API is advisory-only, a non-starter on Apple Silicon), and priority is a rare power-user action for most people. Not worth the cross-platform inconsistency for the value.
 - ntdll.dll hook-byte comparison (on-disk vs in-memory at known Nt* API entry points) + unbacked-executable-memory-region scan, Windows only -- the actual "prove an AV/EDR hook or malware patched something" signal, bigger than the thread-list-with-start-address-resolution shipped in 0.3.0. Revisit once that's proven useful in practice.
-- Synchronous file-scan interference detection (the *other* common meaning of "AV interference" -- a minifilter driver intercepting file I/O and scanning it before letting the open complete, adding latency to the target process while the AV's own process burns CPU) -- Interference Watch (0.3.0) only covers things happening *inside* the watched process itself (an unbacked thread, a newly-loaded module), not this. Would need ETW consumption and correlating I/O latency against the AV process, a materially different and bigger mechanism than either signal shipped so far.
+
+Version 0.5.0 - August 10, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW Interference Watch's 4th signal: Defender file-scan monitoring
+   (ETW Phase 2, Windows-first)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Interference Watch now has a fourth detection signal, live: Windows
+  Defender's own AMFilter minifilter intercepting a file a watched process
+  opens -- the *other* meaning of "AV interference" (synchronous file-scan
+  latency), which the original three signals can't see at all since they
+  only look at what's happening inside the watched process itself, not at
+  it from outside. Shown as a plain "⚠", never "🛑" (Defender doing its job
+  is expected, not an accusation), and unlike the other three, logged every
+  time it happens rather than tracked against a baseline, since a file
+  scan is a momentary event, not a persistent condition.
+- This is genuinely live, in-app ETW consumption -- not a recording like
+  Capture Trace -- via a real-time subscription to
+  Microsoft-Antimalware-AMFilter using github.com/tekert/goetw (pure Go,
+  no CGO, GPL-3.0 -- matching this project's own license). Needed real
+  research to scope correctly: a throwaway spike against the real hardware
+  (subscribing to all four Antimalware providers, deliberately triggering
+  activity via this project's own test/injection tooling, and inspecting
+  ~18,000 captured events) found that only AMFilter's own FileScan task
+  reliably carries the *scanning-triggered* process's real PID in the
+  event header -- Microsoft-Antimalware-RTP's equivalent task has the
+  *engine's* PID (MsMpEng.exe) instead, unusable for correlation without
+  extra work, and Behavior Monitoring events (which, notably, captured
+  this project's own injection tooling's exact OpenProcess call in loving
+  detail) are far higher-volume and system-wide, out of scope for this
+  pass.
+- Needs Administrator rights to create the real-time session at all,
+  confirmed empirically (same requirement Capture Trace already has) --
+  silently just doesn't activate if not running elevated, the same way
+  the other three signals are silently inert on macOS/Linux. Not a
+  deliberate user action with its own dialog, so no error is ever shown
+  for "it didn't start" -- Interference Watch's other three signals work
+  fine either way.
+- The async ETW callback needed real synchronization to hand events to
+  interferenceWatcher.check() (which runs on the main goroutine) without
+  retrofitting a mutex onto that whole pre-existing, previously
+  single-goroutine-only struct -- a small, separate, mutex-protected relay
+  is the one new piece of state that's actually touched from two
+  goroutines, confirmed race-free with `go build -race` on the real
+  hardware (the same lesson Capture Trace's corrupted-.etl bug taught
+  earlier this release, applied proactively here instead of found the
+  hard way again).
+- Also confirmed safe: a stale ETW session left behind by a force-killed
+  prior instance (simulating a crash) doesn't hang or crash a fresh
+  launch -- it just silently fails to (re-)start the 4th signal for that
+  session, same "best-effort, no dialog" behavior as any other failure
+  here.
+- Found via real-world testing (watching Chrome, then Notepad, downloading
+  files, saving files): the file-scan signal never fires at all for a
+  well-known, Microsoft-signed "trusted" process -- Notepad specifically
+  produced zero AMFilter_FileScan events despite a confirmed, completed
+  Save, while Defender's own trust bookkeeping (a *different* AMFilter
+  task, "AMFilter_TrustedProcess") fired reliably for other processes in
+  the same window. Defender appears to fast-track trusted processes
+  through a code path that skips the file-scan event entirely. Added a
+  fallback for exactly this: a process being registered for trust
+  evaluation is now also logged (no file path -- a different, narrower
+  claim than "this file was scanned") -- so a trusted process still shows
+  *something* in the log rather than going silent. Needed its own
+  real-world-verified schema too: the correlating PID for this task lives
+  in the event *payload* ("Pid"), not the header's ProcessID the file-scan
+  signal uses (that field is the Defender component emitting the event,
+  e.g. MsMpEng.exe, not the subject process) -- an easy mistake this
+  session's habit of verifying against real captured events, not
+  documentation or assumption, caught before it shipped wrong.
+- Also found along the way (a thread-stack hit against a Chrome child
+  process mid-download, showing Defender's own on-access-scan module):
+  added mpclient/mpoav to the known-security-module list so a hit like
+  that shows the friendly "Microsoft Defender" label instead of reading
+  as an unrecognized third-party module.
+- Also fixed: an early-return ordering bug that would have skipped the
+  whole 4th-signal block whenever threadStartAddressSupported is false,
+  contradicting this signal's own documented independence from that flag
+  -- harmless on Windows today (where that flag is always true), but
+  caught and fixed while re-reading the code during this same round of
+  real-world testing rather than left for later.
+- Confirmed fully working end-to-end on real hardware, not just via
+  synthetic spikes: watching Chrome (via a directory watch, to cover
+  whichever of its several child processes actually handles a download)
+  and Notepad (via Save) live in the app, both the file-scan signal
+  (Notepad's own icon-cache and tab-state files, Chrome's downloads) and
+  the trust-evaluation fallback (Chrome) fired correctly with the right
+  PIDs and text, and the mpclient/mpoav known-module fix showed the
+  correct "Microsoft Defender" label instead of an unrecognized-module
+  warning.
+- Network usage and disk I/O latency remain a separate, harder, not-yet-
+  started piece of Phase 2 -- see Future ideas.
+
+✨ NEW "Capture Trace" (ETW recording via WPR, Windows-first)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- New View menu/tray item, Windows-only: record an ETW trace to a .etl via
+  Windows Performance Recorder (wpr.exe, built into Windows). Four
+  checkboxes, checked by default -- Network, Disk I/O, File I/O, and
+  Minifilter (the *other* meaning of "AV interference" this app has
+  documented as needing ETW, since Interference Watch's own three signals
+  only cover what happens inside the watched process itself). Start, then
+  Stop && Save or Cancel.
+- Needed zero custom ETW/TDH code -- WPR already has first-class built-in
+  profiles for exactly these gaps, confirmed via `wpr.exe -profiles` on a
+  real machine, so this is a thin wrapper around the same tool, not a
+  from-scratch trace consumer. Verified end-to-end on real hardware: a
+  genuine start/stop/save round trip produced a real, non-empty .etl
+  (~700MB for well under a minute with Network+File I/O alone -- worth
+  knowing before starting a longer capture), and Cancel safely handles
+  being called twice in a row.
+- Needs Administrator rights -- confirmed via real-world testing on this
+  exact release: launched normally, Start failed with "Failed to enable
+  the policy to profile system performance" (all four profiles are
+  kernel-level). No in-app elevation prompt yet -- relaunch ProcessMiner as
+  Administrator first (see the single-instance change right below for why
+  that no longer means quitting your other, normal instance); the error
+  message says so explicitly if you forget.
+- Deliberately not a trace analyzer -- open the result in Windows
+  Performance Analyzer (WPA) instead; see README's Known limitations for
+  why a built-in one isn't planned. This is "ETW work, Phase 1" -- live
+  in-app network/I/O/interference consumption is a separate, much bigger
+  Phase 2, not started (see Future ideas).
+
+🔧 Single-instance enforcement now allows one normal + one elevated
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Windows-only relaxation of the "always exactly one instance" rule, added
+  specifically for Capture Trace: a second copy is now allowed if its
+  elevation differs from the first's (one normal + one elevated, either
+  order) -- so using Capture Trace no longer means quitting your regular,
+  already-running instance first. Two at the *same* elevation level still
+  isn't allowed -- that's the actual resource-doubling concern the rule
+  exists for, unchanged. Checks each instance's own token via
+  windows.Token.IsElevated() (already wrapped in golang.org/x/sys/windows,
+  no hand-rolled bindings needed here) -- PROCESS_QUERY_LIMITED_INFORMATION
+  is the same access level Task Manager's own "Elevated" column relies on
+  to report on other processes without itself needing elevation.
+- Elevated instances now say so in every window's title bar
+  ("Administrator: KrankyBear ProcessMiner"), Windows' own convention for
+  elevated console windows -- added once running elevated became a real,
+  everyday mode for this app rather than an internal detail.
+- Capture Trace now checks elevation upfront: opening the window without
+  Administrator rights shows an explanation and a one-click "Relaunch as
+  Administrator" button instead of the checkboxes and Start button, rather
+  than letting you click through a whole round trip just to hit the same
+  admin-rights error every time. The button (ShellExecute's "runas" verb,
+  a real UAC prompt) launches a second, elevated copy without closing this
+  one -- only possible cleanly because of the single-instance relaxation
+  right above; declining the UAC prompt is treated as a normal choice, not
+  an error, so nothing happens rather than showing a scary dialog.
+
+🐛 FIXED "already running" alert window rendering far too tall
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found via real-world testing on Windows: triggering the "already
+  running" dialog (e.g. by trying to launch a third instance) rendered an
+  extremely tall, narrow window -- a Fyne wrapped-label minimum-size
+  calculation issue that surfaced once the elevation-aware message text
+  above grew past a couple of short lines. Shortened the message and
+  pinned the window to a fixed size rather than chasing the exact layout
+  cause for what's just a small alert dialog.
+- Also found via the same testing: the "already running" window is its own
+  separate process with no connection to whichever instance(s) it's
+  complaining about, so it doesn't close when those do -- it was sitting
+  around as an orphaned leftover until dismissed manually. Now polls the
+  same check it was built from every couple of seconds and closes itself
+  once it's no longer true. Still no real cross-process IPC, just noticing
+  the process list changed, the same way the check itself already works.
+
+🐛 FIXED Capture Trace corrupting the .etl if you exit mid-save
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found the hard way via real-world testing: exiting ProcessMiner while
+  Stop && Save's `wpr -stop` was still merging a trace corrupted the .etl
+  (WPA refused to open the result). Root cause: quitApp's cleanup step
+  unconditionally called `wpr -cancel` to tear down any still-running
+  capture, but the code tracking "is a session running" didn't distinguish
+  "recording" from "currently being saved" -- so quitting mid-save raced
+  an actual `wpr -cancel` against the still-in-flight `wpr -stop`, and losing
+  that race is exactly what corrupted the file. Fixed at the root: cleanup
+  now only cancels a session that's just sitting there recording, never one
+  mid-save or already finished -- letting a save that's already in flight
+  finish on its own in the background even if you exit (wpr.exe is a
+  separate process Windows doesn't tie to this app's lifetime), rather than
+  actively sabotaging it. Needed a real mutex, not just careful ordering --
+  this state is genuinely touched from two different goroutines (the save's
+  own background goroutine and quitApp's main-goroutine cleanup), confirmed
+  by rebuilding with `go build -race` on the real hardware.
+- Also made the "Saving…" status impossible to miss while this window
+  exists: red/danger-styled text explicitly warning not to exit until it
+  finishes. Exiting still can't be blocked outright, so this is the
+  practical mitigation on top of the actual fix above.
+
+🐛 FIXED Hide All / Show All missing the Threads and Children windows
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found via real-world testing on Windows: Hide All (Alt+H) / Show All
+  already covered About/Help/Update/System Info/Resource Details/
+  Interference Watch, but not a Threads window or a Children drill-down --
+  they'd stay sitting on screen through a Hide All, and not come back with
+  the rest through a Show All. Same package-level window-tracking pattern
+  the other windows already use, just not wired up for these two yet.
+
 
 Version 0.4.0 - August 08, 2026
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

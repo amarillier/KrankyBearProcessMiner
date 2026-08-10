@@ -99,6 +99,37 @@ const (
 	// with Process Explorer/Procmon for confirmation," not proof on its
 	// own -- see interference.go's classifyModule and knownSecurityModules.
 	EventForeignStackModule
+	// EventAVFileScan: Windows Defender's own AMFilter minifilter
+	// intercepted a file pid opened -- the *other* meaning of "AV
+	// interference" (synchronous file-scan latency from a security
+	// product's filter driver), which the other three signals can't see at
+	// all since they only look at what's happening *inside* the watched
+	// process itself. Windows-only, and only live when running elevated
+	// (creating the real-time ETW session needs Administrator rights,
+	// confirmed empirically) -- see avmonitor_windows.go. Unlike the other
+	// three, a file scan is a momentary event, not an ongoing condition, so
+	// there's no baseline/persistence concept here -- see
+	// interference.go's checkAVFileScan.
+	EventAVFileScan
+	// EventAVTrustEval: Defender's AMFilter registered pid for trust
+	// evaluation ("AMFilter_TrustedProcess"/Reason=="create") -- a
+	// complementary fallback to EventAVFileScan, added after real-world
+	// testing found that EventAVFileScan never fires at all for a
+	// well-known, Microsoft-signed "trusted" process (confirmed with
+	// notepad.exe: zero AMFilter_FileScan events despite a completed file
+	// save, while AMFilter_TrustedProcess fired reliably for other
+	// processes in the same window) -- Defender appears to fast-track
+	// trusted processes through a different, lighter-weight code path that
+	// skips the full file-scan event entirely. This event carries no file
+	// path at all (confirmed empirically -- the provider's own Path field
+	// is always "NULL" for this task), so it's a categorically different
+	// claim than EventAVFileScan: "Defender is aware of and evaluating
+	// this process," not "Defender scanned this specific file." Also
+	// unlike EventAVFileScan, the correlating PID lives in the event's
+	// *payload* (a "Pid" property), not the event header's ProcessID
+	// (which is the Defender component emitting it, e.g. MsMpEng.exe) --
+	// see avmonitor_windows.go.
+	EventAVTrustEval
 )
 
 // InterferenceEvent records one detected sign of interference on a process
@@ -121,4 +152,8 @@ type InterferenceEvent struct {
 	StartAddr   string
 	ModuleName  string
 	KnownVendor string
+
+	// FilePath is set for EventAVFileScan: the file Defender's AMFilter
+	// minifilter scanned when pid opened it.
+	FilePath string
 }

@@ -17,13 +17,28 @@ import (
 
 const (
 	// appName    = "KrankyBear ProcessMiner"
-	appVersion = "0.4.0" // see FyneApp.toml
+	appVersion = "0.5.0" // see FyneApp.toml
 	appAuthor  = "Allan Marillier"
 	appID      = "com.github.amarillier.KrankyBearProcessMiner"
 )
 
 var appName = "KrankyBear ProcessMiner"
 var appCopyright = buildCopyrightNotice()
+
+// adminTitlePrefix returns "Administrator: " when running elevated, ""
+// otherwise -- for windows whose title doesn't include appName at all
+// (Threads/Children, titled from the target process's own name+PID, e.g.
+// "chrome.exe (PID 1234) — Threads") and so never picked up the same
+// elevation prefix appName's own change gives every other window for free.
+// Found via real-world testing: with one normal + one elevated instance
+// both able to open a Threads/Children window for the same or different
+// processes, there was no way to tell which instance's window was which.
+func adminTitlePrefix() string {
+	if isCurrentProcessElevated() {
+		return "Administrator: "
+	}
+	return ""
+}
 
 // procSampler mirrors the package-level aboutWindow/helpWindow pattern: a
 // single long-lived background worker that must be stopped before quit (see
@@ -58,6 +73,17 @@ func main() {
 	if anotherInstanceRunning() {
 		showAlreadyRunningAndExit(a)
 		return
+	}
+
+	// Windows' own convention for an elevated console window's title bar --
+	// matters more here than usual since running elevated is now a real,
+	// user-visible mode (see singleinstance.go's one normal + one elevated
+	// exception), not just an internal detail. appName is a var (not a
+	// const) specifically so every window built from it -- System Info,
+	// Resource Details, Capture Trace, etc. -- picks this up too, not just
+	// the main window.
+	if isCurrentProcessElevated() {
+		appName = "Administrator: " + appName
 	}
 
 	win := a.NewWindow(appName)
@@ -108,6 +134,16 @@ func main() {
 
 	checkForUpdatesAuto(a) // quiet, once-per-day check; dialog only if an update exists
 
+	// Best-effort, silent: the 4th Interference Watch signal (Defender
+	// AMFilter file-scan monitoring) needs Administrator rights to create
+	// its real-time ETW session at all (confirmed empirically), same
+	// requirement Capture Trace already has. Unlike starting a capture,
+	// this isn't a deliberate user action with its own dialog -- it's a
+	// bonus signal that's simply not there if unelevated (Interference
+	// Watch's other three signals work fine either way), so any error here
+	// is discarded rather than surfaced.
+	_ = startAVMonitor()
+
 	procSampler.Start() // start background sampling only once content/menu/tray are wired
 
 	win.ShowAndRun()
@@ -146,8 +182,13 @@ func saveMainWindowGeometry(a fyne.App, win fyne.Window) {
 }
 
 // quitApp does teardown in the order CLAUDE.md calls out: stop background work
-// first, then persist geometry, then quit.
+// first, then persist geometry, then quit. cancelCapture goes first, even
+// before procSampler.Stop() -- an active WPR trace session is an OS-level
+// resource that outlives this process if not explicitly torn down, unlike
+// procSampler's in-process goroutine (see capture_windows.go).
 func quitApp(a fyne.App, win fyne.Window) {
+	cancelCapture()
+	stopAVMonitor()
 	if procSampler != nil {
 		procSampler.Stop()
 	}
@@ -176,6 +217,7 @@ func buildMenu(a fyne.App, win fyne.Window, refreshNow, endSelected func(), show
 		fyne.NewMenuItem("Resource Details", func() { showResourceDetail(resCPU) }),
 		fyne.NewMenuItem("System Info", func() { showSystemInfo(a) }),
 		fyne.NewMenuItem("Watch for Interference", showInterference),
+		fyne.NewMenuItem("Capture Trace", func() { showCaptureWindow(a) }),
 	)
 	processMenu := fyne.NewMenu("Process",
 		fyne.NewMenuItem("Refresh Now", refreshNow),
@@ -212,6 +254,7 @@ func setupSystemTray(a fyne.App, win fyne.Window, refreshNow, endSelected func()
 		fyne.NewMenuItem("Resource Details", func() { fyne.Do(func() { showResourceDetail(resCPU) }) }),
 		fyne.NewMenuItem("System Info", func() { fyne.Do(func() { showSystemInfo(a) }) }),
 		fyne.NewMenuItem("Watch for Interference", func() { fyne.Do(showInterference) }),
+		fyne.NewMenuItem("Capture Trace", func() { fyne.Do(func() { showCaptureWindow(a) }) }),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Help", func() { fyne.Do(func() { showHelp(a) }) }),
 		fyne.NewMenuItem("Check for Updates", func() { checkForUpdatesManual(a) }),

@@ -29,6 +29,15 @@ func hideAllWindows(win fyne.Window) {
 	if interferenceWindow != nil && interferenceOpen {
 		interferenceWindow.Hide()
 	}
+	if childDrilldownWindow != nil && childDrilldownOpen {
+		childDrilldownWindow.Hide()
+	}
+	if threadsWindow != nil && threadsOpen {
+		threadsWindow.Hide()
+	}
+	if captureWindow != nil && captureOpen {
+		captureWindow.Hide()
+	}
 }
 
 // showAllWindows reveals the main window plus whichever secondary windows
@@ -53,6 +62,15 @@ func showAllWindows(win fyne.Window) {
 	}
 	if interferenceWindow != nil && interferenceOpen {
 		interferenceWindow.Show()
+	}
+	if childDrilldownWindow != nil && childDrilldownOpen {
+		childDrilldownWindow.Show()
+	}
+	if threadsWindow != nil && threadsOpen {
+		threadsWindow.Show()
+	}
+	if captureWindow != nil && captureOpen {
+		captureWindow.Show()
 	}
 }
 

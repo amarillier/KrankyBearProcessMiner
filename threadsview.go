@@ -48,9 +48,17 @@ var threadColumns = []threadColumn{
 // needs reading another process's memory, which needs an entitlement Apple
 // doesn't grant ordinary third-party apps on macOS, or root/CAP_SYS_PTRACE
 // on Linux (see threads_other.go / Help for the full explanation).
+// threadsWindow/-Open mirror the state windows.go's hide-all/show-all cares
+// about, same reasoning as procview.go's childDrilldownWindow/-Open: the
+// window itself is owned by procViewState.threadsWin, private state with no
+// other package-level hook for windows.go to reach into.
+var threadsWindow fyne.Window
+var threadsOpen bool
+
 func (st *procViewState) buildThreadsWindow() {
 	st.threadsWin = st.app.NewWindow("")
 	st.threadsWin.SetIcon(resourceKrankyBearProcessMinerPng)
+	threadsWindow = st.threadsWin
 
 	// A real header row over aligned columns -- graduated from a single
 	// free-form text line per row (which had no way to label what each
@@ -96,6 +104,8 @@ func (st *procViewState) buildThreadsWindow() {
 	st.threadsWin.SetOnClosed(func() {
 		fynetooltip.DestroyWindowToolTipLayer(st.threadsWin.Canvas())
 		st.threadsWin = nil
+		threadsWindow = nil
+		threadsOpen = false
 		st.threadsWinPID = -1
 		st.threadsWinSummary = ThreadSummary{}
 	})
@@ -122,10 +132,11 @@ func (st *procViewState) openOrRefreshThreadsWindow(pid int32, name string) {
 		st.buildThreadsWindow()
 	}
 	st.threadsWinPID = pid
-	st.threadsWin.SetTitle(fmt.Sprintf("%s (PID %d) — Threads", name, pid))
+	st.threadsWin.SetTitle(fmt.Sprintf("%s%s (PID %d) — Threads", adminTitlePrefix(), name, pid))
 	st.threadsWinTableSection.Hide()
 	st.threadsWinCountLabel.SetText("Loading…")
 	st.threadsWinCountLabel.Show()
+	threadsOpen = true
 	st.threadsWin.Show()
 	st.threadsWin.RequestFocus()
 
