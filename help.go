@@ -54,8 +54,21 @@ alongside each graph.
 PROCESS TABLE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • PID, Name, PPID, User, CPU%, Mem%, Memory, Disk R, Disk W, Private,
-  Handles — click a column header to sort by it, click again to reverse.
+  Handles — click a column header to sort by it; clicking the same header
+  again cycles ascending → descending → unsorted (back to whatever order
+  the last snapshot/filter produced, no arrow shown) → ascending again.
   Drag a column boundary to resize it.
+• "Columns…" (next to Refresh Now) hides individual columns you don't need
+  -- handy once the column count grows past what a narrower/laptop display
+  can show without horizontal scrolling. Name always stays visible (every
+  row needs at least one column that says which process it is); every
+  other column, including ones added by later features, gets a checkbox.
+  Persists across launches.
+• "Export CSV…" (next to Columns…) saves exactly what's on screen --
+  whichever columns are currently visible, in the current filter/sort order
+  -- to a CSV file. Cell values match the display (same number formatting)
+  but without Name/User/Notable's on-screen truncation, which only exists
+  to fit a table cell, not a spreadsheet column.
 • Memory shows actual physical memory in use (RSS -- Resident Set Size),
   the same figure Mem% is computed from, on all three platforms. In the
   Parent-processes view, both Mem% and Memory show the combined total
@@ -93,6 +106,12 @@ PROCESS TABLE:
   combined via OR — a process shows if it clears *any* one of the enabled
   thresholds. A combination not offered out of the box by any of the
   platform-native tools this app draws on.
+• "Notify on Threshold Breach" (off by default) sends a desktop notification
+  the instant a process newly crosses one of those same four thresholds --
+  a rising-edge event, so a process that stays hot only notifies once, not
+  every tick. Leave every threshold above at Off and this simply never
+  fires; no separate configuration. Checks every running process, not just
+  what the name filter or Parent-processes view happens to be showing.
 • "Regex" checkbox switches the name filter from a plain substring match
   to a real regexp match — e.g. ^(?i)(process|activity).* to compare just
   this app's own processes against Activity Monitor's, with nothing else
@@ -238,6 +257,25 @@ a Bluetooth or device-enumeration API actually gets touched) -- normal
 behavior, not evidence of anything. The event log helps you build a sense
 of what's normal for a given process versus what's worth a second look.
 
+WATCH PERSISTENCE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Interference Watch's watch list survives a restart. Directory watches are
+simple -- just a path -- so they're restored silently and take effect
+immediately, no review needed. Process watches are different: a PID means
+nothing across a restart, so each one is remembered by its executable path
+(the strong, unambiguous key) with its name as a fallback for the rare case
+the path couldn't be captured. On the next launch, once the process list is
+available, a one-time "Reactivate Watches" window lists each remembered
+process watch against what's actually running now: found and ready to
+reactivate (checked by default -- uncheck to skip it just this once),
+"N matching processes found" if more than one currently-running process
+shares that same executable path (reactivating watches all of them, not
+just one -- there's no picker for choosing among them), or "not currently
+running" with a "Forget" button to remove it for good. Leaving an entry
+unchecked, or just closing the window, keeps it pending and offers it again
+next launch rather than losing it. This window only appears when there's
+something to review -- nothing shows up if no process watches were saved.
+
 CHECK SIGNATURE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 A different angle on the same "trust but verify" idea as Thread Inspection
@@ -257,7 +295,44 @@ embedded signature would flag a huge share of stock Windows as "unsigned."
 Revocation isn't checked (that would mean a network fetch per check,
 against this app's offline-first design elsewhere) -- this is a structural
 check (is it signed, does the chain lead to somewhere trusted), not a live
-"has this certificate been revoked since" verdict.
+"has this certificate been revoked since" verdict. On Windows, the main
+table also has a "Signed" column running the same check automatically in
+the background, once per process, showing the same ✓/⚠/🛑 icons without
+needing to click the button -- the "Check Signatures" checkbox above the
+table turns this off if you'd rather not have it running at all (it won't
+show an icon for a process it hasn't gotten to checking yet). Neither the
+column nor the checkbox appear at all on macOS/Linux -- there's nothing
+useful either one could ever show there, so rather than leave a permanently
+blank column and a permanently disabled checkbox in view, both are simply
+absent.
+
+OPEN HANDLES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Select a process and click "Show Handles" for a one-off snapshot (not a
+live view) of every open handle/file descriptor it holds and what it
+points to, where resolvable — the individual detail behind the count the
+"Handles" column already shows. Unlike Thread Inspection, every platform
+gets a real listing here; the difference between them is how hard it is to
+get, not whether it's possible. Linux: full path resolution straight from
+/proc/[pid]/fd. macOS: the same proc_pidinfo call the Handles column's
+count already uses can list each one, and a second call
+(proc_pidfdinfo/PROC_PIDFDVNODEPATHINFO) resolves file-backed ones to a
+path — no root needed for your own processes, but a different-user or
+protected process fails outright, same as elsewhere in this app. Windows is
+the hardest: an undocumented system call (NtQuerySystemInformation) lists
+every handle system-wide, then each one belonging to the selected process
+is duplicated into this app and queried (NtQueryObject) for its type and,
+where applicable, its path — a File-type handle's path is translated from
+its raw kernel form (e.g. "\Device\HarddiskVolume3\...") back to a familiar
+drive letter. One specific query (resolving a handle's name) is a
+well-known, if rare, way to hang indefinitely — classically a named pipe
+with no listener on the other end.
+This app guards against that with a timeout: a handle that doesn't resolve
+in time shows "(query timed out)" instead of blocking the whole snapshot,
+and a banner at the top of the window says how many hit this. Registry key
+paths currently show in their raw internal form (e.g. "\REGISTRY\MACHINE\...")
+rather than translated to "HKLM"/"HKCU". Same single-reusable-window,
+follows-the-selection behavior as the Threads window above.
 
 CAPTURE TRACE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -294,6 +369,56 @@ Start failure that can
 still happen even elevated is a stale capture left running by an earlier
 crash -- Cancel clears that.
 
+NETWORK/DISK I/O MONITORING:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Windows-only, via the "Show Network/Disk I/O" checkbox above the main
+table. Unlike Capture Trace above, this is live, in-app ETW consumption --
+not a recording to analyze later in WPA, but four columns that update
+every sample tick: "Net Send"/"Net Recv" (live per-process network
+throughput), "Disk Latency" (average disk I/O completion time attributed
+to this process), and "Connections" (how many TCP connections this
+process currently has open -- a quick way to tell which of several
+same-named processes, e.g. a dozen Chrome renderers, is actually talking
+to the network right now, without opening each one's own Connections
+window to check). This is the "real per-process network usage and I/O
+latency" piece this app's own backlog left open for a while -- per-process
+network use in particular isn't available from gopsutil at all (unlike
+CPU/Memory/Disk R/W), so this needed ETW specifically.
+Off by default, unlike the Signed column's own "Check Signatures"
+checkbox -- this one starts a real kernel-level tracing session (needs
+Administrator, same requirement Capture Trace has), so it shouldn't turn
+on silently. Turning it on and failing (most likely: not running elevated)
+shows the reason in a dialog rather than doing nothing. Currently always
+uses the same underlying kernel session Capture Trace's own Network/Disk
+I/O profiles use (regardless of Windows version -- a from-scratch modern
+per-provider mechanism exists in the code for Windows 11+ but is disabled
+for now; its exact event format turned out to be undocumented anywhere
+and didn't produce data in real testing, unlike the older mechanism, which
+is what wpr.exe itself actually relies on), so the two can't run together
+-- attempting either while the other is active shows a clear error
+explaining why, rather than one silently stopping the other. A process
+shows blank in these columns until it's actually done something
+measurable (sent/received data, completed a disk I/O, opened a
+connection) since the checkbox was turned on -- not an error, just nothing
+to report yet; Connections specifically shows "0" rather than blank once
+something else about the process has been observed, since a confirmed
+zero is different information from "nothing known yet". If the columns
+stay blank even after that, a diagnostic log
+(<per-user config dir>/netio-debug.jsonl) records the raw shape of every
+distinct kind of event actually captured, for troubleshooting.
+
+"Show Connections" (next to Show Handles/Show Threads) opens a live,
+per-process window listing the selected process's currently open TCP
+connections -- local/remote address:port and direction (Outbound: this
+process called connect(); Inbound: this process accepted an incoming
+connection). Needs "Show Network/Disk I/O" turned on, same session. Unlike
+Show Handles/Show Threads (a one-off snapshot, re-taken only when you
+select a different process), this window updates every sample tick while
+open, since the underlying data is itself continuously live. Ordinary
+browsing connections are often too brief to catch between sample ticks --
+a sustained transfer (e.g. a large file download) gives a much clearer,
+longer-lived view than everyday traffic does.
+
 RESIZABLE LAYOUT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Drag the divider between the process table and the detail pane, and the
@@ -329,25 +454,36 @@ instantaneous value rather than being hidden.
 SYSTEM INFO WINDOW:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 View menu / system tray ("System Info") shows a point-in-time summary:
-computer name and OS/platform/version/architecture, CPU model/cores/
-logical processors/speed, total memory, mounted disk volumes with size,
-and network adapters with type (wired/wireless), connected status, and
-WiFi signal strength where applicable. Adapter type is a name-pattern
-heuristic, not guaranteed accurate for unusual adapter names. Disk volumes
-are mounted filesystems, not raw physical disks. "Copy to Clipboard" grabs
-the whole summary as plain text. The window opens right away with a
-"Collecting…" message while gathering runs in the background — on macOS
-this can take 10+ seconds (WiFi signal strength there needs a slow system
-tool), so the delay is expected, not a hang.
+computer name and OS/platform/version/architecture, the computer's
+model/vendor/serial and BIOS vendor/version/date (via
+github.com/jaypipes/ghw -- WMI on Windows, /sys/class/dmi on Linux,
+diskutil on macOS; blank rather than a guess wherever the platform or
+this particular machine doesn't populate that data), CPU model/cores/
+logical processors/speed, total memory, physical disks (model/vendor/size/
+type -- HDD vs. SSD where the platform can tell, also via ghw) as a
+separate section from the mounted disk volumes with size (the same
+distinction Disk R/W's own Help entry makes: a physical disk vs. a
+filesystem mounted on it), and network adapters with type (wired/
+wireless), connected status, and WiFi signal strength where applicable.
+Adapter type is a name-pattern heuristic, not guaranteed accurate for
+unusual adapter names. "Copy to Clipboard" grabs the whole summary as
+plain text. The window opens right away with a "Collecting…" message while
+gathering runs in the background — on macOS this can take 10+ seconds
+(WiFi signal strength there needs a slow system tool), so the delay is
+expected, not a hang.
 
 WINDOW MANAGEMENT:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Hovering the system tray icon (Windows, macOS) shows the app name as a
+tooltip, same as most other tray icons -- "Administrator: ..." too, on an
+elevated instance, matching every window's title bar under the same
+convention.
 Hide All / Show All (Window menu or system tray) hides the main window and
 every other currently-open window together (About/Help/Update, System
 Info, Resource Details, Interference Watch, a Children drill-down, a
-Threads window), then brings back exactly that same set later. Alt+H is a
-boss-key hotkey for Hide All — there's no matching Show hotkey by design;
-reveal via the Window menu or tray instead.
+Threads window, a Handles window), then brings back exactly that same set
+later. Alt+H is a boss-key hotkey for Hide All — there's no matching Show
+hotkey by design; reveal via the Window menu or tray instead.
 Only one instance of this app runs at a time — launching a second copy
 shows a small "already running" window with a Quit button instead. On
 Windows, one exception: a second copy at a *different* elevation level

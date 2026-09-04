@@ -26,7 +26,15 @@ var captureStatusLabel *widget.Label
 var captureStartBtn *ttwidget.Button
 var captureStopBtn *ttwidget.Button
 var captureCancelBtn *ttwidget.Button
+var captureOpenFolderBtn *ttwidget.Button
+var captureOpenWPABtn *ttwidget.Button
 var captureProfileChecks []*ttwidget.Check
+
+// lastCaptureSavePath is the most recently saved .etl's path -- captureOpenFolderBtn/
+// captureOpenWPABtn stay enabled across a later capture (still a valid, real
+// file until something else deletes it), only reset by a fresh save
+// overwriting it or the window not existing yet (empty, buttons disabled).
+var lastCaptureSavePath string
 
 // showCaptureWindow opens (or reveals) the Capture Trace window: pick which
 // WPR profiles to record (see captureProfiles), Start, then Stop & Save to
@@ -125,7 +133,15 @@ func buildCaptureControls() fyne.CanvasObject {
 	captureCancelBtn.SetToolTip("Discard the current recording without saving")
 	captureCancelBtn.Disable()
 
-	buttons := container.NewHBox(captureStartBtn, captureStopBtn, captureCancelBtn)
+	captureOpenFolderBtn = ttwidget.NewButton("Open File Location", openCaptureFolderClicked)
+	captureOpenFolderBtn.SetToolTip("Open Explorer with the last saved .etl selected")
+	captureOpenFolderBtn.Disable()
+
+	captureOpenWPABtn = ttwidget.NewButton("Open in WPA", openCaptureInWPAClicked)
+	captureOpenWPABtn.SetToolTip("Open the last saved .etl in Windows Performance Analyzer")
+	captureOpenWPABtn.Disable()
+
+	buttons := container.NewHBox(captureStartBtn, captureStopBtn, captureCancelBtn, captureOpenFolderBtn, captureOpenWPABtn)
 
 	return container.NewPadded(container.NewBorder(
 		container.NewVBox(banner, widget.NewSeparator(), checksBox, widget.NewSeparator()),
@@ -224,6 +240,9 @@ func stopCaptureClicked() {
 					return
 				}
 				captureStatusLabel.SetText("Saved to " + path)
+				lastCaptureSavePath = path
+				captureOpenFolderBtn.Enable()
+				captureOpenWPABtn.Enable()
 			})
 		}()
 	}, captureWindow)
@@ -252,6 +271,29 @@ func cancelCaptureClicked() {
 			captureStatusLabel.SetText("Idle (cancelled)")
 		})
 	}()
+}
+
+// openCaptureFolderClicked and openCaptureInWPAClicked both just start a
+// separate process (explorer.exe/wpa.exe) and return immediately -- unlike
+// startCapture/stopCapture/cancelCapture, there's no slow work here needing
+// its own goroutine, only a possible immediate error (e.g. wpa.exe missing)
+// to surface.
+func openCaptureFolderClicked() {
+	if lastCaptureSavePath == "" {
+		return
+	}
+	if err := openCaptureFileLocation(lastCaptureSavePath); err != nil {
+		dialog.ShowError(err, captureWindow)
+	}
+}
+
+func openCaptureInWPAClicked() {
+	if lastCaptureSavePath == "" {
+		return
+	}
+	if err := openCaptureInWPA(lastCaptureSavePath); err != nil {
+		dialog.ShowError(err, captureWindow)
+	}
 }
 
 // relaunchElevatedClicked launches a second, elevated copy of this app --

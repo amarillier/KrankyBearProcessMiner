@@ -35,6 +35,12 @@ func hideAllWindows(win fyne.Window) {
 	if threadsWindow != nil && threadsOpen {
 		threadsWindow.Hide()
 	}
+	if handlesWindow != nil && handlesOpen {
+		handlesWindow.Hide()
+	}
+	if connWindow != nil && connWindowOpen {
+		connWindow.Hide()
+	}
 	if captureWindow != nil && captureOpen {
 		captureWindow.Hide()
 	}
@@ -68,6 +74,12 @@ func showAllWindows(win fyne.Window) {
 	}
 	if threadsWindow != nil && threadsOpen {
 		threadsWindow.Show()
+	}
+	if handlesWindow != nil && handlesOpen {
+		handlesWindow.Show()
+	}
+	if connWindow != nil && connWindowOpen {
+		connWindow.Show()
 	}
 	if captureWindow != nil && captureOpen {
 		captureWindow.Show()

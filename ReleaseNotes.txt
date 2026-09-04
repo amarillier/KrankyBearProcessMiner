@@ -2,20 +2,447 @@ Release notes
 KrankyBear ProcessMiner -- cross-platform (Windows, Linux, macOS) process/system monitor
 
 Future ideas:
-- Persist watched processes/directories in Preferences across launches, with a reactivation flow at startup (see/choose to reactivate, edit, or leave disabled). Bigger than it first looks: PIDs aren't meaningful across a restart, so a process watch would need to persist by *name* (or exe path) instead and re-match against whatever's actually running next launch -- straightforward for directory watches (just the path), needs real design for process watches (what if two processes share a name? what if it never comes back?). The auto-open/focus half of this same idea shipped already (see 0.3.0 below); this is just the persistence/reactivation half.
-
-- ETW-based work, Phase 2 continued: real per-process network usage and I/O latency -- the minifilter/AV-interference third of Phase 2 shipped AND is confirmed fully working in 0.5.0 (Interference Watch's 4th signal + trust-eval fallback, verified end-to-end against real Chrome/Notepad activity, not just a synthetic spike -- see 0.5.0 below), and turned out not to need any hand-rolled StartTrace/TDH bindings after all -- github.com/tekert/goetw (pure Go, no CGO) already wraps that, and the relevant providers (Microsoft-Antimalware-*) are modern and well-documented. Network usage and disk I/O latency are the genuinely hard remainder, still not started: confirmed empirically this round that WPR's Network/DiskIO profiles pull from the classic, MOF-based "NT Kernel Logger" mechanism instead (unnamed provider GUIDs even wevtutil can't resolve to a friendly name) -- a materially different, more special-cased API (SystemTraceControlGuid + EnableFlags bitmasks, not EnableTraceEx2-by-provider-GUID) with unconfirmed support even in goetw (which does expose NewKernelRealTimeSession/NewSystemTraceSession -- worth checking first, not assumed either way).
-
-- Per-process open-handles/files window (listing each individual open handle/fd with what it actually points to, not just the count the Handles column already shows) -- promoted here from "some day maybe" after real use: the 0.4.0 Handles column immediately surfaced a process with a surprisingly high count, which the count alone can't explain -- you need the list of *what* to actually debug it. Feasibility is uneven across platforms, though: Linux is easy (/proc/[pid]/fd already resolves each entry to a path); macOS is moderate (the same proc_pidinfo call the count uses can list each fd, and proc_pidfdinfo/PROC_PIDFDVNODEPATHINFO resolves file-backed ones to a path, no root needed for your own processes); Windows is the hard one -- undocumented NtQuerySystemInformation(SystemHandleInformation) plus per-handle NtQueryObject name resolution, and querying certain handle types (notably a named pipe with no listener) can hang, needing a timeout/worker-thread workaround. Comparable in size to the thread-list/stack-scan work already shipped, not a quick add.
-
-- User option show additional column for signed or unsigned processes with a simple icon, or unicode checkmark, whatever is lowest resource use? Maybe minimize impact by performing background check after launch and populate as possible, and when new processes are detected. Maybe not that valuable, but signed vs unsigned might also be useful in troubleshooting if not a substantial burden. Recognizing this is Windows only with authenticode.
-
-
 Some day maybe, maybe never - defer for now
-- Network user per process - unlikely since gopsutil does not have access to this.
+- Network use per process - shipped in 0.7.0 (ETW-based, Windows-only) -- no
+  longer blocked on gopsutil, which still has no access to this itself.
 - GPU resource use - Windows only since not readily available for Mac/Linux, maybe some day if we perceive value
 - Process CPU affinity / priority controls -- scrapped rather than deferred: affinity has no real macOS support at all (Apple's affinity API is advisory-only, a non-starter on Apple Silicon), and priority is a rare power-user action for most people. Not worth the cross-platform inconsistency for the value.
 - ntdll.dll hook-byte comparison (on-disk vs in-memory at known Nt* API entry points) + unbacked-executable-memory-region scan, Windows only -- the actual "prove an AV/EDR hook or malware patched something" signal, bigger than the thread-list-with-start-address-resolution shipped in 0.3.0. Revisit once that's proven useful in practice.
+- Real CPU/motherboard temperature -- deliberately scrapped, not just deferred: the only reason tools like LibreHardwareMonitor can read this on Windows is a bundled ring0 driver (WinRing0.sys) for direct hardware-register access, and that exact driver's leaked/expired signing certificate has been abused in real BYOVD ransomware attacks (which is also why some AV/EDR flags it). Not worth bundling a kernel driver, signed or not, for a "nice to have" temperature reading. A headless CLI dump mode (one-shot snapshot to CSV/JSON and exit, for scripted/cron collection) was also considered here as a "some day" -- lower priority than the Future ideas above since nobody's asked for it yet.
+- Disk S.M.A.R.T. health/temperature -- looked at this round (prompted by a
+  request for BIOS/hardware info generally, which 0.7.0 does ship). No viable
+  pure-Go Windows library exists: github.com/anatol/smart.go and its forks
+  explicitly document Windows as unsupported (confirmed by reading the actual
+  source, not assumed), and a web search turned up nothing more mature. The
+  real options are hand-rolled WMI (MSStorageDriver_FailurePredictStatus --
+  just a pass/fail boolean, no driver) or raw
+  DeviceIoControl/IOCTL_ATA_PASS_THROUGH (full SMART attributes, more code) --
+  either doable in the same style as this app's other *_windows.go files, but
+  moved here rather than Future ideas: lower perceived value than the other
+  items above it, on top of the extra hand-rolled work. Revisit only if a
+  failing disk actually causes a real support case.
+
+Version 0.7.0 - September 1, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW "Net Send"/"Net Recv"/"Disk Latency" columns (ETW Phase 2 continued, Windows-first)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The genuinely hard remainder Future ideas has flagged since 0.5.0: real
+  per-process network throughput and disk I/O completion latency, live, via
+  ETW. New "Show Network/Disk I/O" checkbox (default OFF, unlike "Check
+  Signatures" -- this one starts a real kernel-level tracing session, needs
+  Administrator, so it shouldn't turn on silently) feeds three new columns.
+  Confirmed empirically this round: github.com/tekert/goetw fully supports
+  both the legacy singleton "NT Kernel Logger" (NewKernelRealTimeSession) and
+  a modern per-provider mechanism (NewSystemTraceSession, Windows 11+) --
+  the "unconfirmed support" caveat from earlier Future ideas notes is
+  resolved either way.
+- Network throughput turned out to be the easy half: classic TcpIp/UdpIp
+  events carry the real subject PID directly in the payload. Disk latency is
+  the hard half -- DiskIo completion events carry HighResResponseTime
+  (latency, no manual Init/Complete IRP correlation needed) but no PID at
+  all, only IssuingThreadId, since completion runs on an arbitrary kernel-
+  stack thread. Attribution needs a TID->PID map, built by adapting the
+  existing NtQuerySystemInformation(SystemProcessInformation) buffer-walk
+  threads.go already uses for thread inspection (there scoped to one target
+  PID) into a full-system scan, refreshed once per sample tick.
+- Windows 11+ now uses the modern SystemIoProviderGuid per-provider session
+  instead of the legacy singleton -- resolved after this had briefly shipped
+  disabled (a prior real-hardware attempt found zero events and no
+  documented field names to fix it from). A real capture on Windows 11 25H2
+  produced a full netio-debug.jsonl, which showed every event still carries
+  ProviderGUID {9E814AAD-3204-11D2-9A82-006008A86939} (the classic "NT
+  Kernel Logger" GUID) with the exact same TcpIp/UdpIp/DiskIo Task names,
+  IPV4/IPV6 Opcode names, and PID/size/daddr/saddr/dport/sport/connid/
+  IssuingThreadId/HighResResponseTime properties the legacy path already
+  decodes -- the modern mechanism turned out to be a different
+  session/enablement API over the same underlying provider, not a
+  differently-shaped one, so no decode changes were needed at all. Confirmed
+  end-to-end: real moving values in Net Send/Net Recv/Disk Latency and the
+  Connections window. Since it isn't the singleton kernel session, it also
+  runs alongside Capture Trace freely on Windows 11+, exactly as the
+  in-app error message already promised. Windows 10 still falls back to the
+  legacy singleton mechanism, which does share Capture Trace's session --
+  starting either while the other is active there shows a clear error
+  explaining why, rather than one silently stopping the other mid-capture
+  (the same class of corruption 0.5.0 fixed for exiting mid-save).
+- One real bug caught via real-world testing on a Windows 11 box, elevated:
+  the checkbox would silently stay checked with zero data in any column, no
+  error, even during a genuine large download over gigabit fiber. Root
+  cause: NewKernelRealTimeSession only configures EnableFlags in memory --
+  unlike EnableProvider (used elsewhere in this app, e.g. avmonitor_windows.go's
+  AMFilter session, which starts the session as a side effect), it has no
+  path that actually calls the real StartTrace API. goetw's own Consumer.Start
+  only opens a trace handle to an already-running session (confirmed in its
+  source, which has a literal "// TODO: make is auto start the sessions"
+  comment) -- so a handle was opened to a session that was never really
+  started, and nothing ever arrived. Fixed with an explicit session.Start()
+  call. A netio-debug.jsonl diagnostic log (same per-user folder as the
+  watchlist) was also added alongside this fix: it records the real
+  provider/task/opcode/property shape of every distinct kind of event
+  actually captured, capped at 60 shapes, so a future schema mismatch (e.g.
+  reviving the modern Windows 11 path) can be fixed from real captured data
+  instead of guessing.
+- Confirmed fully working end-to-end on real hardware after the fix: a
+  genuine large file download (an AlmaLinux ISO, over gigabit fiber to an
+  SSD) produced real, moving numbers in Net Recv and Disk Latency, filtered
+  down to just the relevant browser process. Values show as brief flashes
+  rather than a steady rate at that connection speed -- expected, not a bug:
+  the 2-second sample tick often lands between bursts on fast-enough
+  hardware, exactly the kind of thing worth confirming against real traffic
+  rather than assuming.
+- A second real bug, caught the same "capture real events, don't assume"
+  way: the very first netio-debug.jsonl actually inspected (from a real
+  Windows box, added below for the Connections work) showed the real
+  classic-provider opcode names carry an address-family suffix this app
+  never accounted for -- "SendIPV4"/"SendIPV6", "RecvIPV4"/"RecvIPV6", not
+  the bare "Send"/"Recv" the code checked for. That means Net Send/Net Recv
+  could never actually have populated on IPv4 or IPv6 traffic; the
+  "confirmed... produced real, moving numbers" claim two paragraphs up
+  reflects what testing appeared to show at the time, but with this bug
+  in place, the more likely explanation is Disk Latency alone (DiskIo's
+  "Read"/"Write" opcode names have no such suffix, and were never affected)
+  was what actually moved, not Net Recv. Fixed by matching opcode names by
+  prefix instead of exact string -- see the Connections entry below, which
+  hit the identical bug and shares the fix.
+
+✨ NEW "Show Connections" live per-process TCP connections list (ETW Phase 2 continued)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The other Future ideas item this release's ETW work opened the door to: a
+  live, per-process list of TCP connections (local/remote address:port,
+  direction) -- more like `netstat -b` than a throughput counter. New "Show
+  Connections" button (gated behind "Show Network/Disk I/O", same session)
+  opens a window that decodes the same TcpIp Connect/Accept/Disconnect
+  opcodes the existing legacy session already carries, keyed by the kernel's
+  own per-connection `connid` so a connection stays listed correctly across
+  its lifetime rather than by address:port (which can be reused). Field
+  names sourced from goetw's own generated kernel MOF definitions -- the
+  same PID/saddr/sport/daddr/dport shape Send/Recv/DiskIo already use
+  successfully, not a fresh guess.
+- First real-hardware pass opened and ran without error, but real
+  inspection of a captured netio-debug.jsonl from that same box (see the
+  Net Send/Net Recv correction above) showed why rows weren't actually
+  appearing: this code checked for opcode names "Connect"/"Accept"/
+  "Disconnect" exactly, but the real events are named "ConnectIPV4"/
+  "AcceptIPV4"/"DisconnectIPV4" (and an IPV6 counterpart for
+  Connect/Disconnect -- no AcceptIPV6 sighting yet, but matched the same
+  way regardless). Fixed by matching opcode names by prefix
+  (`strings.HasPrefix`) instead of an exact match, the same fix applied to
+  Net Send/Net Recv above -- one code change covers both. As a side effect
+  this also decodes IPv6 connections, which turned out to need no special
+  handling at all (the property names and formatting are address-family-
+  agnostic) -- not the "IPv4 only, IPv6 is a known gap" limitation an
+  earlier draft of this feature assumed.
+- New "Connections" main-table column (same "Show Network/Disk I/O" gating)
+  shows each process's live open-connection count -- prompted directly by
+  testing this feature against a handful of same-named Chrome renderer
+  processes: opening each one's own Connections window just to find which
+  one actually had traffic was tedious, and a per-row count answers that at
+  a glance instead. Shows "0" once something else about the process has
+  been observed rather than staying blank, since a confirmed zero is real
+  information (same distinction the other three columns already draw
+  between "blank = nothing known yet" and "a real, checked value").
+  Deliberately not click-sortable, matching Net Send/Net Recv/Disk
+  Latency's own existing limitation (their live values live outside
+  ProcInfo, which the sort comparator doesn't have access to) -- sorting by
+  it to surface the busiest processes first is a natural next step if this
+  turns out to matter beyond the testing convenience it was built for.
+- A second real bug, caught by the "Connections" column above making the
+  problem actually visible: a sustained large download (10Gb/s) never
+  showed more than 0 open connections for the downloading process, even
+  though real throughput was confirmed elsewhere. Root cause: Connect/
+  Accept only fire at the exact moment a connection is established --
+  a connection already open before "Show Network/Disk I/O" was turned on
+  (a browser's kept-alive HTTP/2 connection, reused for a download started
+  well after the tab was opened, is exactly this case) never produces one,
+  so it stayed permanently invisible to a connections list built only from
+  Connect/Accept/Disconnect, despite generating a continuous, very real
+  stream of Send/Recv traffic the whole time. Fixed by opportunistically
+  treating the first Send/Recv sighting of a not-yet-tracked connection as
+  a substitute "this connection exists" signal (Send/Recv carry the same
+  PID/address/port/connid fields Connect/Accept do) -- shown with a new
+  "Existing" Direction value so it's clear the entry's existence, not which
+  side dialed or accepted, is what's actually known. Guarded by a small
+  known-connection cache checked from the ETW callback itself (not just
+  deduped later) so this doesn't mean re-extracting every property on every
+  single packet for the rest of a busy connection's life -- Send/Recv fire
+  once per network packet, making this a genuinely hot path during exactly
+  the kind of sustained high-throughput transfer that surfaced the bug.
+- Polls every sample tick while open (like the children drill-down window)
+  rather than snapshotting once like Threads/Handles, since the underlying
+  data is itself continuously live, not something worth re-fetching on its
+  own timer.
+- Re-confirmed against real traffic after both fixes above is still the
+  planned next step.
+
+✨ NEW "Columns…" column visibility (main table + children window)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- New button next to Refresh Now opens a checklist of every column except
+  Name (always visible -- a row needs at least one column that identifies
+  which process it is), letting you hide whichever ones you don't need.
+  Prompted directly by this release's own three new columns pushing the
+  total past what a laptop display can show without horizontal scrolling --
+  same "Narrower main window" motivation as 0.4.0's toolbar-row split, this
+  time for columns instead of buttons. Choices persist across launches and
+  apply to the children drill-down window too, since it shares the exact
+  same column set.
+
+✨ IMPROVED Header-click sort now cycles through an unsorted state
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Clicking the same column header repeatedly used to only ever toggle
+  ascending/descending. Now cycles ascending -> descending -> unsorted (rows
+  in whatever order the last snapshot/filter produced them, no header arrow
+  shown) -> ascending again, matching the convention other data-grid
+  applications already use. Clicking a *different* column still jumps
+  straight to ascending, unchanged. Applies to both the main table and the
+  children drill-down window, each with its own independent sort state as
+  before.
+
+✨ IMPROVED Long User/Notable text no longer overflows into the next column
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found via real-world testing on Windows: a long account name (e.g. "NT
+  AUTHORITY\NETWORK SERVICE") or Notable label rendered past its own column's
+  width, visually bleeding into whatever column came next. Both now
+  ellipsize to fit, reusing the exact same measure-and-trim helper the Name
+  column has used since 0.1.0 -- cheap enough to call on every visible cell,
+  already proven at that cost for Name.
+
+✨ NEW BIOS / computer model / physical-disk info (System Info window)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- System Info now also shows BIOS vendor/version/date, the computer's own
+  model/vendor/serial (falling back to motherboard vendor/model/serial when
+  a system doesn't populate the former -- common on DIY desktops), and a new
+  "Physical Disks" section (model/vendor/size/drive type -- HDD vs. SSD where
+  the platform can tell) as its own thing distinct from the existing "Disk
+  Volumes" section, which is mounted filesystems, not raw disks -- a gap
+  this app's own code comments have called out since 0.2.0.
+- Via a new dependency, github.com/jaypipes/ghw: WMI on Windows (the same
+  standard, unprivileged classes Task Manager itself reads -- no
+  Administrator needed), /sys/class/dmi on Linux, `diskutil` on macOS (same
+  cost tier as this window's existing system_profiler shell-out for WiFi).
+  Zero cgo, matching this project's standing preference.
+- Considered and explicitly not pursued alongside this: disk S.M.A.R.T.
+  health/temperature (no viable pure-Go Windows library -- see Future ideas)
+  and real CPU/motherboard temperature (would need a bundled ring0 driver in
+  the LibreHardwareMonitor/WinRing0 mold -- see Some day maybe, maybe never
+  for the BYOVD security reasoning against that).
+
+🐛 FIXED an elevated launch silently breaking persisted state
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found while adding the netio-debug.jsonl log above: an elevated Windows
+  launch's window-title prefix ("Administrator: KrankyBear ProcessMiner")
+  was also being used, unmodified, as the directory name for per-user app
+  data. A colon is illegal in a Windows path component outside the drive-
+  letter position, so this was silently failing every save under it on an
+  elevated launch -- meaning the persisted Interference Watch watchlist and
+  the update-checker's cache, both of which use this exact path convention,
+  may never have actually saved when running elevated, ever. Fixed by
+  stripping the "Administrator: " prefix before building these paths, in one
+  shared helper now used by all three (watchlist, update-check cache, and
+  the new debug log).
+
+✨ NEW "Export CSV…" (save the current process view to a file)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- New button next to Columns…: saves exactly what's currently on screen --
+  whichever columns Columns… left visible, in the current filter/sort order
+  -- to a CSV file via a save dialog, same dialog.NewFileSave pattern
+  Capture Trace's own Stop && Save already established. Cell values match
+  what's displayed (same number formatting, e.g. "12.3" for CPU%, real
+  byte-size strings for Memory) but without Name/User/Notable's on-screen
+  ellipsizing, which only exists to fit a fixed-width table cell -- a
+  spreadsheet column doesn't have that problem.
+
+✨ NEW "Notify on Threshold Breach" (desktop notification)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- New checkbox next to the Top CPU/Mem/Memory/Disk selects (off by default --
+  a notification is a background-monitoring convenience, not something that
+  should start firing unasked just because a threshold happens to already be
+  set): sends a real desktop notification the instant a process newly
+  crosses one of those same four thresholds. Reuses whichever thresholds are
+  already configured rather than a separate set of notification-specific
+  ones -- leaving all four at Off means this simply never fires.
+- A rising-edge event, not "still above": a process that stays hot only
+  notifies once, when it first crosses, the same "baseline, don't cry wolf"
+  precedent Interference Watch's own unbacked-thread/new-module signals
+  already established for their first check. Runs off every currently-
+  running process, not just what the name filter or Parent-processes view
+  happens to be showing, so a breach in a hidden row still notifies.
+
+🔧 IMPROVED System tray icon now shows a hover tooltip (Windows, macOS)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Prompted by a real observation: other apps' Windows tray icons show the
+  app name on hover, this one didn't. Fyne's own desktop.App interface
+  genuinely has no tooltip setter (checked its definition directly --
+  SetSystemTrayMenu/SetSystemTrayIcon/SetSystemTrayWindow is the whole
+  list), but fyne.io/systray, the library Fyne's own desktop driver already
+  uses internally for the tray icon, does expose one -- a documented no-op
+  on Linux, real on Windows and macOS. Already an indirect dependency via
+  Fyne itself; promoted to direct here, same as purego was for
+  handles_darwin.go in 0.6.0. Uses the same appName the window titles do,
+  so an elevated instance's tray tooltip says "Administrator: ..." too.
+- Fyne's own SetSystemTrayIcon call works no matter when it's called
+  because Fyne caches the icon and re-applies it once the tray is actually
+  ready internally -- a raw systray.SetTooltip call made directly from
+  application code has no equivalent caching, so it's set from a short
+  deferred timer instead of inline, to give the tray time to actually
+  exist first. Not yet verified against real hardware whether that delay
+  is reliably long enough -- flagged explicitly rather than assumed.
+
+🔧 IMPROVED Quitting no longer looks hung when it takes a few seconds
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found via real-world testing: stopping a live kernel ETW session under
+  real load (Show Network/Disk I/O with active traffic) can genuinely take
+  several real seconds (confirmed ~6s), and running that inline on the main
+  goroutine during window close blocked the message pump for the whole time
+  -- Windows would pop its own "Not Responding" dialog even though nothing
+  was actually deadlocked. The slow teardown calls (cancelCapture/
+  stopAVMonitor/stopNetIOMonitor/procSampler.Stop) now run on a background
+  goroutine instead, with a small "Closing… flushing monitoring/trace data"
+  progress dialog shown for the duration so it visibly reads as closing, not
+  hung. A separate, rarer report of the process surviving quit for actual
+  hours (not seconds) -- see the quit-hang investigation notes -- remains
+  open; a watchdog added alongside this dumps a full goroutine-stack trace
+  to a temp file if teardown is still running after 4 seconds, well short of
+  "hours," so a real recurrence is finally diagnosable.
+
+✨ NEW "Open File Location" / "Open in WPA" buttons after Capture Trace saves
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Prompted by real-world use: a Capture Trace .etl can run into multiple
+  gigabytes, at which point "go find it in Explorer, then go find WPA and
+  open it" is real friction right after the save you just waited for
+  already finished. Both buttons stay disabled until a save completes, then
+  enable and target that saved .etl's path -- Open File Location launches
+  `explorer.exe /select,<path>` (pre-selects the file, doesn't just open the
+  folder); Open in WPA launches `wpa.exe <path>` directly. Both fire-and-
+  forget (Start(), not Run()) since there's nothing meaningful to wait for.
+- WPA itself is a separate, optional install (Microsoft Store or the
+  Windows ADK's "Windows Performance Toolkit" -- unlike wpr.exe, which ships
+  in-box), so Open in WPA checks PATH first and surfaces a plain "not
+  installed" error rather than silently doing nothing, which would otherwise
+  look like a bug rather than a missing optional tool.
+
+Version 0.6.0 - August 19, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW Interference Watch survives a restart (watch persistence + reactivation)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Directory watches now restore silently and immediately on launch -- just a
+  path, nothing to review. Process watches are the half the backlog itself
+  flagged as needing real design: a PID means nothing across a restart, so
+  each is remembered by its executable path instead (resolved fresh at quit
+  via the existing resolveProcessExe helper), falling back to name-only for
+  the rare case a process had already exited before its path could be
+  captured. Saved to a plain JSON file (<UserConfigDir>/<appName>/
+  watchlist.json), the same directory/namespacing convention the update
+  checker's own cache already established in this app -- not Fyne
+  Preferences, which (confirmed by inspection) has never stored anything
+  but scalar floats/strings here, so there was no existing list/JSON
+  convention there to extend.
+- New one-time "Reactivate Watches" window on launch, once a real process
+  list exists to match against: each remembered process watch shows as
+  found-and-ready (checkbox, checked by default), "N matching processes
+  found" if more than one currently-running process shares that exact exe
+  path (reactivating watches all of them -- no per-instance picker, keeping
+  this to one row per remembered watch rather than one per matched PID,
+  same "any process from this target" spirit directory watching already
+  has), or "not currently running" with a Forget button. Leaving a row
+  unchecked, or just closing the window, keeps it pending for the next
+  launch instead of losing it -- the backlog's own "reactivate / edit /
+  leave disabled" framing, directly. Silent (no window at all) when nothing
+  was saved, same precedent the daily automatic update check already set
+  for "a dialog that might appear once at launch depending on state."
+- Verified end-to-end on macOS: watched a real process and a real directory,
+  confirmed the saved JSON's content, confirmed the directory re-armed
+  silently on a fresh launch, confirmed a saved process watch whose exe path
+  matches a real running process resolves and offers reactivation
+  correctly, and confirmed a saved entry with no match shows "not currently
+  running" without error. interference.go/interferenceview.go themselves
+  needed zero changes -- this is purely new code (watchpersist.go,
+  watchreactivateview.go) plus small hooks in main.go's startup/quit
+  sequence, reusing watchPID/watchDir/unwatchPID/unwatchDir exactly as they
+  already work.
+
+✨ NEW "Open Handles" window (per-process handle/fd listing, all 3 platforms)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- New "Show Handles" button next to Show Threads/Watch for Interference/
+  Check Signature: a one-off snapshot of every open handle/file descriptor a
+  selected process holds and what it actually points to, where resolvable --
+  promoted from Future ideas after the 0.4.0 Handles column surfaced a
+  process with a surprisingly high count that the count alone couldn't
+  explain. Same single-reusable-window, follows-the-selection window
+  lifecycle as the existing Threads window (openOrRefreshThreadsWindow's
+  pattern, copied line-for-line).
+- Unlike Thread Inspection, every platform gets a real per-handle listing
+  here -- the difference between platforms is implementation difficulty, not
+  capability, so there's no Windows-only gating this time. Linux: plain
+  /proc/[pid]/fd readlinks. macOS: proc_pidinfo (PROC_PIDLISTFDS) to list,
+  proc_pidfdinfo (PROC_PIDFDVNODEPATHINFO) to resolve file-backed ones to a
+  path -- this project's first use of github.com/ebitengine/purego (cgo-free
+  dlopen/dlsym FFI), already an indirect dependency via gopsutil (which uses
+  it for the exact same two libproc calls), just promoted to direct here;
+  still zero cgo anywhere in this project. Verified for real against this
+  project's own running process on the author's Mac, not just compiled --
+  caught and fixed a real bug this way: proc_pidfdinfo kept returning ENOMEM
+  for every vnode-type fd until the buffer struct's header was corrected from
+  the small proc_fdinfo {fd, fdtype} pair (right for PROC_PIDLISTFDS's array)
+  to the larger proc_fileinfo struct the detailed "withpath" calls actually
+  expect -- the kernel's buffersize check rejects anything not exactly the
+  right size, so the wrong header silently produced empty paths on every
+  call rather than an obvious error.
+- Windows is the hard one, as flagged in Future ideas: NtQuerySystemInformation
+  (SystemExtendedHandleInformation -- deliberately the Ex class, not the
+  legacy one the backlog named colloquially, since the legacy struct's PID
+  field is a 16-bit USHORT, silently wrong above PID 65535) lists every
+  handle system-wide; each one belonging to the target process is duplicated
+  into this app (a handle value only means something inside its owning
+  process's own table) and queried via NtQueryObject for its type and,
+  where applicable, its path. File-type paths are translated from raw kernel
+  form ("\Device\HarddiskVolume3\...") to a drive letter via the classic
+  QueryDosDevice technique. Registry key paths show in raw NT form for now
+  (not translated to HKLM/HKCU) -- a nice-to-have, not essential, deferred.
+- The one real hazard here, exactly as Future ideas anticipated: resolving a
+  handle's name can hang indefinitely for certain handle types (classically,
+  a named pipe with no listener on the other end) -- no existing
+  timeout-guarded-goroutine pattern anywhere else in this codebase to copy,
+  so this is genuinely new infrastructure. Each name query runs in its own
+  goroutine with a 100ms timeout; on timeout the row shows "(query timed
+  out)" and a banner at the top of the window reports how many. The
+  duplicated handle's closure is owned by that goroutine itself (closed
+  whenever NtQueryObject actually returns, however late), not the caller --
+  only a truly permanent hang leaks a handle/goroutine, and handles are
+  queried sequentially so at most one such leak is ever outstanding at once.
+  This is the same accepted tradeoff Process Explorer/Process Hacker
+  themselves carry for this exact API -- Go, like any userspace caller, has
+  no way to cancel a blocked syscall. Not yet verified against real hardware
+  (needs the author's Windows box); flagged explicitly rather than assumed.
+
+✨ NEW "Signed" column (background Authenticode check, Windows-first)
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- The 0.4.0 "Check Signature" button is a deliberate one-off (resolving the
+  exe path and running WinVerifyTrust both do real disk/crypto work, too
+  expensive to repeat every row every tick) -- this adds the same ✓/⚠/🛑
+  check as an always-on column instead, by making it a background, cached,
+  once-per-process-lifetime operation rather than a per-tick one. New "Check
+  Signatures" checkbox (default on, next to "Parent processes only") turns
+  the background checking off entirely if you'd rather not have it running;
+  turning it back on resumes checking whatever's still unchecked rather than
+  re-checking from scratch.
+- New per-PID cache/relay (signature_watcher.go), modeled directly on two
+  existing patterns: Interference Watch's exeCache/prune (check once per
+  PID's lifetime, drop the cache entry when the PID exits, so a reused PID
+  can't inherit a stale verdict) and avmonitor.go's mutex-protected
+  offer()/drain() relay (the actual check runs on a background goroutine,
+  never the UI goroutine). A small per-tick budget (8 new checks) and a
+  2-slot concurrency semaphore mean a fresh launch against hundreds of
+  processes fills the column in gradually over several sample ticks instead
+  of firing hundreds of checks at once -- directly answering the backlog's
+  own "populate as possible" phrasing.
+- Windows only, same as the button it's built on. Caught via real macOS
+  testing: an earlier version of this still showed the column (permanently
+  blank) and the checkbox (permanently disabled, relabeled "(Windows
+  only)") on macOS/Linux -- a dead column with no way to hide it was worse
+  than not offering it, so buildProcColumns now leaves "Signed" out of the
+  column list entirely on an unsupported platform, and the checkbox simply
+  isn't built there either, rather than being built-then-disabled.
+
 
 Version 0.5.0 - August 10, 2026
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

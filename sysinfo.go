@@ -12,6 +12,7 @@ import (
 	fynetooltip "github.com/dweymouth/fyne-tooltip"
 	ttwidget "github.com/dweymouth/fyne-tooltip/widget"
 
+	"github.com/jaypipes/ghw"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
@@ -36,19 +37,55 @@ type SystemInfo struct {
 
 	MemTotal uint64
 
-	Disks       []DiskVolumeInfo
-	NetAdapters []NetAdapterInfo
+	// BIOS/Baseboard/Product come from github.com/jaypipes/ghw (WMI on
+	// Windows, /sys/class/dmi on Linux -- both cheap, unprivileged reads; a
+	// diskutil shell-out on macOS, same cost tier as the existing WiFi
+	// system_profiler call below, not a new category of slowness). All
+	// blank on a platform/machine ghw can't read this from (a stub, or a
+	// VM/board that doesn't populate DMI/SMBIOS) -- same "blank rather than
+	// a misleading guess" convention as CPUMhz's N/A handling.
+	BIOSVendor  string
+	BIOSVersion string
+	BIOSDate    string
+
+	ProductName   string
+	ProductVendor string
+	ProductSerial string
+
+	BaseboardVendor string
+	BaseboardModel  string
+	BaseboardSerial string
+
+	Disks         []DiskVolumeInfo
+	PhysicalDisks []PhysicalDiskInfo
+	NetAdapters   []NetAdapterInfo
 }
 
 // DiskVolumeInfo is a mounted volume, not a raw physical disk -- gopsutil
-// has no cross-platform physical-disk enumeration (that needs deeper
-// per-platform APIs: diskutil/WMI/smartctl), so this is the pragmatic
-// gopsutil-based proxy, same granularity as "Disk 0 (C:)" vs. a raw device
-// would be if we went further than what's readily available.
+// has no cross-platform physical-disk enumeration, which is why
+// PhysicalDiskInfo below (via ghw) was added rather than trying to stretch
+// this one to cover both.
 type DiskVolumeInfo struct {
 	Device     string
 	Mountpoint string
 	TotalBytes uint64
+}
+
+// PhysicalDiskInfo is one raw physical disk (not a mounted volume/partition
+// -- see DiskVolumeInfo above for that distinction) -- model/vendor/serial
+// identify which actual drive is installed, and DriveType (HDD/SSD/etc.,
+// where the platform can tell) is a real, non-obvious "why is this slow"
+// answer Task Manager's own storage tab shows but this app didn't have any
+// way to determine before ghw. Windows: Win32_DiskDrive + MSFT_PhysicalDisk
+// via WMI. Linux: /sys/block. macOS: `diskutil list/info -plist` (ghw's own
+// shell-out, same cost tier as this file's existing system_profiler call).
+type PhysicalDiskInfo struct {
+	Model        string
+	Vendor       string
+	SerialNumber string
+	SizeBytes    uint64
+	DriveType    string // "HDD"/"SSD"/"Unknown"/etc. -- blank if the platform can't tell
+	Removable    bool
 }
 
 func gatherSystemInfo() SystemInfo {
@@ -87,6 +124,34 @@ func gatherSystemInfo() SystemInfo {
 				Device:     p.Device,
 				Mountpoint: p.Mountpoint,
 				TotalBytes: usage.Total,
+			})
+		}
+	}
+
+	if b, err := ghw.BIOS(ghw.WithDisableWarnings()); err == nil {
+		info.BIOSVendor = b.Vendor
+		info.BIOSVersion = b.Version
+		info.BIOSDate = b.Date
+	}
+	if p, err := ghw.Product(ghw.WithDisableWarnings()); err == nil {
+		info.ProductName = p.Name
+		info.ProductVendor = p.Vendor
+		info.ProductSerial = p.SerialNumber
+	}
+	if bb, err := ghw.Baseboard(ghw.WithDisableWarnings()); err == nil {
+		info.BaseboardVendor = bb.Vendor
+		info.BaseboardModel = bb.Product
+		info.BaseboardSerial = bb.SerialNumber
+	}
+	if blk, err := ghw.Block(ghw.WithDisableWarnings()); err == nil {
+		for _, d := range blk.Disks {
+			info.PhysicalDisks = append(info.PhysicalDisks, PhysicalDiskInfo{
+				Model:        d.Model,
+				Vendor:       d.Vendor,
+				SerialNumber: d.SerialNumber,
+				SizeBytes:    d.SizeBytes,
+				DriveType:    d.DriveType.String(),
+				Removable:    d.IsRemovable,
 			})
 		}
 	}
@@ -176,6 +241,12 @@ func renderSystemInfo(win fyne.Window, info SystemInfo) {
 		orNA(info.Hostname), orNA(info.Platform), info.PlatformVersion, orNA(info.KernelArch)))
 	computerLabel.Wrapping = fyne.TextWrapWord
 
+	modelLabel := widget.NewLabel(formatModelLine(info))
+	modelLabel.Wrapping = fyne.TextWrapWord
+
+	biosLabel := widget.NewLabel(formatBIOSLine(info))
+	biosLabel.Wrapping = fyne.TextWrapWord
+
 	cpuLabel := widget.NewLabel(fmt.Sprintf("%s\n%d cores / %d logical processors @ %s",
 		orNA(info.CPUModel), info.CPUCores, info.CPUThreads, formatCPUSpeed(info.CPUMhz)))
 	cpuLabel.Wrapping = fyne.TextWrapWord
@@ -207,6 +278,8 @@ func renderSystemInfo(win fyne.Window, info SystemInfo) {
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Computer", fyne.TextAlignLeading, bold),
 		computerLabel,
+		modelLabel,
+		biosLabel,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("CPU", fyne.TextAlignLeading, bold),
 		cpuLabel,
@@ -214,7 +287,10 @@ func renderSystemInfo(win fyne.Window, info SystemInfo) {
 		widget.NewLabelWithStyle("Memory", fyne.TextAlignLeading, bold),
 		memLabel,
 		widget.NewSeparator(),
-		widget.NewLabelWithStyle(fmt.Sprintf("Disks (%d)", len(info.Disks)), fyne.TextAlignLeading, bold),
+		widget.NewLabelWithStyle(fmt.Sprintf("Physical Disks (%d)", len(info.PhysicalDisks)), fyne.TextAlignLeading, bold),
+		physicalDiskRows(info.PhysicalDisks),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle(fmt.Sprintf("Disk Volumes (%d)", len(info.Disks)), fyne.TextAlignLeading, bold),
 		diskRows(info.Disks),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle(fmt.Sprintf("Network Adapters (%d)", len(info.NetAdapters)), fyne.TextAlignLeading, bold),
@@ -241,6 +317,74 @@ func formatCPUSpeed(mhz float64) string {
 	return fmt.Sprintf("%.2f GHz", mhz/1000)
 }
 
+// formatModelLine prefers Product info (the whole-computer identity, e.g.
+// "Dell XPS 13") over Baseboard (the motherboard alone) since it's the more
+// recognizable answer to "what machine is this" -- Baseboard is only used
+// as a fallback when Product came back empty (ghw's own doc notes some
+// systems, especially DIY desktops, only populate one or the other).
+func formatModelLine(info SystemInfo) string {
+	model := strings.TrimSpace(info.ProductVendor + " " + info.ProductName)
+	serial := info.ProductSerial
+	if model == "" {
+		model = strings.TrimSpace(info.BaseboardVendor + " " + info.BaseboardModel)
+		serial = info.BaseboardSerial
+	}
+	if model == "" {
+		return "Model: N/A"
+	}
+	if serial == "" {
+		return "Model: " + model
+	}
+	return fmt.Sprintf("Model: %s (serial %s)", model, serial)
+}
+
+func formatBIOSLine(info SystemInfo) string {
+	if info.BIOSVendor == "" && info.BIOSVersion == "" {
+		return "BIOS: N/A"
+	}
+	var parts []string
+	if info.BIOSVendor != "" {
+		parts = append(parts, info.BIOSVendor)
+	}
+	if info.BIOSVersion != "" {
+		parts = append(parts, "v"+info.BIOSVersion)
+	}
+	if info.BIOSDate != "" {
+		parts = append(parts, info.BIOSDate)
+	}
+	return "BIOS: " + strings.Join(parts, " ")
+}
+
+// formatPhysicalDiskLine renders one raw physical disk (see PhysicalDiskInfo)
+// -- shared by the window's list and formatSystemInfoText's plain-text copy.
+func formatPhysicalDiskLine(d PhysicalDiskInfo) string {
+	name := strings.TrimSpace(d.Vendor + " " + d.Model)
+	if name == "" {
+		name = "Unknown disk"
+	}
+	text := fmt.Sprintf("%s — %s", name, formatBytes(d.SizeBytes))
+	if d.DriveType != "" && d.DriveType != "Unknown" {
+		text += ", " + d.DriveType
+	}
+	if d.Removable {
+		text += ", removable"
+	}
+	return text
+}
+
+func physicalDiskRows(disks []PhysicalDiskInfo) fyne.CanvasObject {
+	if len(disks) == 0 {
+		return widget.NewLabel("N/A")
+	}
+	rows := make([]fyne.CanvasObject, len(disks))
+	for i, d := range disks {
+		label := widget.NewLabel(formatPhysicalDiskLine(d))
+		label.Wrapping = fyne.TextWrapWord
+		rows[i] = label
+	}
+	return container.NewVBox(rows...)
+}
+
 // formatSystemInfoText renders the same information as renderSystemInfo
 // into plain text, for the "Copy to Clipboard" button -- e.g. to paste into
 // a bug report or a message comparing this against Task Manager/Process
@@ -249,12 +393,22 @@ func formatSystemInfoText(info SystemInfo) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s - System Info\n\n", appName)
 	fmt.Fprintf(&b, "Computer: %s\n", orNA(info.Hostname))
-	fmt.Fprintf(&b, "OS: %s %s (%s)\n\n", orNA(info.Platform), info.PlatformVersion, orNA(info.KernelArch))
+	fmt.Fprintf(&b, "OS: %s %s (%s)\n", orNA(info.Platform), info.PlatformVersion, orNA(info.KernelArch))
+	fmt.Fprintf(&b, "%s\n%s\n\n", formatModelLine(info), formatBIOSLine(info))
 	fmt.Fprintf(&b, "CPU: %s\n", orNA(info.CPUModel))
 	fmt.Fprintf(&b, "%d cores / %d logical processors @ %s\n\n", info.CPUCores, info.CPUThreads, formatCPUSpeed(info.CPUMhz))
 	fmt.Fprintf(&b, "Memory: %s total\n\n", formatBytes(info.MemTotal))
 
-	fmt.Fprintf(&b, "Disks (%d):\n", len(info.Disks))
+	fmt.Fprintf(&b, "Physical Disks (%d):\n", len(info.PhysicalDisks))
+	if len(info.PhysicalDisks) == 0 {
+		b.WriteString("N/A\n")
+	}
+	for _, d := range info.PhysicalDisks {
+		fmt.Fprintf(&b, "- %s\n", formatPhysicalDiskLine(d))
+	}
+	b.WriteString("\n")
+
+	fmt.Fprintf(&b, "Disk Volumes (%d):\n", len(info.Disks))
 	if len(info.Disks) == 0 {
 		b.WriteString("N/A\n")
 	}

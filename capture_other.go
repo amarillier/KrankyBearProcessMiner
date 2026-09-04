@@ -23,4 +23,16 @@ func cancelCapture() error {
 	return nil
 }
 
+func captureIsActive() bool {
+	return false
+}
+
+func openCaptureFileLocation(string) error {
+	return errors.New("not available on this platform yet")
+}
+
+func openCaptureInWPA(string) error {
+	return errors.New("not available on this platform yet")
+}
+
 // "Now this is not the end. It is not even the beginning of the end. But it is, perhaps, the end of the beginning." Winston Churchill, November 10, 1942

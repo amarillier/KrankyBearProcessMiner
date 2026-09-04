@@ -15,6 +15,23 @@ func checkFileExists(filePath string) bool {
 	return !errors.Is(error, os.ErrNotExist)
 }
 
+// appConfigDirName returns the directory name for per-user app data
+// (<UserConfigDir>/<appConfigDirName()>/...), stable regardless of
+// elevation. appName itself gets an "Administrator: " prefix on an elevated
+// Windows launch (main.go, so every window title shows it) -- using appName
+// directly here would put a literal colon in a Windows path component
+// (illegal there outside the drive-letter position), silently failing every
+// os.MkdirAll/file write under it, and would also give an elevated run a
+// completely separate state directory from a normal run's, splitting the
+// persisted watchlist and update-check cache exactly the "one normal + one
+// elevated" exception (see CLAUDE.md/Help) was added to keep working
+// together. Found while adding a debug log path for Phase 2 ETW's
+// network/disk-I/O work; fixed here once and reused by every call site
+// below rather than repeating the mistake in a new one.
+func appConfigDirName() string {
+	return strings.TrimPrefix(appName, "Administrator: ")
+}
+
 // updateCheckStatePath returns the per-user path where the update checker
 // caches the last-seen release tag, namespaced by repo (the library only
 // caches tag/name, not which repo, so a bare filename could clash if this
@@ -24,7 +41,7 @@ func updateCheckStatePath(repo string) string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, appName, "latestcheck-"+repo+".json")
+	return filepath.Join(dir, appConfigDirName(), "latestcheck-"+repo+".json")
 }
 
 // updateChecker checks repoOwner/repo's latest published GitHub release against

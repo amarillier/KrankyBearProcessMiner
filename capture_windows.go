@@ -67,6 +67,9 @@ func startCapture(profiles []string) error {
 	if len(profiles) == 0 {
 		return fmt.Errorf("select at least one profile to capture")
 	}
+	if netIOUsingLegacySession() {
+		return fmt.Errorf("Capture Trace can't start while Network/Disk I/O monitoring is active on this Windows version -- they use the same underlying kernel session. Turn off the \"Show Network/Disk I/O\" checkbox first, or use Windows 11+ where both can run together")
+	}
 	args := make([]string, 0, len(profiles)*2)
 	for _, p := range profiles {
 		args = append(args, "-start", p)
@@ -124,6 +127,19 @@ func stopCapture(path string) error {
 // separate process Windows doesn't tie to this one's lifetime, so it keeps
 // merging in the background even after this app exits, as long as nothing
 // actively interrupts it.
+// captureIsActive reports whether a WPR session is running or being saved --
+// checked by netio_windows.go's startNetIOMonitor before starting the legacy
+// singleton "NT Kernel Logger" session (Windows 10 only; the modern
+// SystemTraceSession path on Windows 11+ doesn't share this session and
+// never needs this check), so Network/Disk I/O watching can't silently stop
+// an in-flight capture the way cancelCapture's own doc comment describes
+// happening the hard way for quitApp.
+func captureIsActive() bool {
+	captureMu.Lock()
+	defer captureMu.Unlock()
+	return captureState != captureIdle
+}
+
 func cancelCapture() error {
 	captureMu.Lock()
 	if captureState != captureRunning {
@@ -166,6 +182,31 @@ func wrapWPRError(step string, out []byte, err error) error {
 		return fmt.Errorf("%s failed: %s\n\nThis needs Administrator rights (kernel-level tracing) -- close ProcessMiner and relaunch it as Administrator (right-click the app/shortcut -> \"Run as administrator\"), then try again.", step, msg)
 	}
 	return fmt.Errorf("%s failed: %s", step, msg)
+}
+
+// openCaptureFileLocation opens Explorer with the saved .etl pre-selected --
+// "/select," is a single token (no space before the path) that's how
+// explorer.exe's own CLI expects it; passing it as one Go argument still
+// gets correctly quoted by exec on Windows if path itself contains spaces.
+// Fire-and-forget like relaunchElevated's ShellExecute -- there's nothing
+// meaningful to wait for or report back once Explorer has launched.
+func openCaptureFileLocation(path string) error {
+	return exec.Command("explorer.exe", "/select,"+path).Start()
+}
+
+// openCaptureInWPA launches Windows Performance Analyzer directly against
+// the saved .etl. WPA itself is a separate, optional install (Microsoft
+// Store or the Windows ADK's "Windows Performance Toolkit" -- see the
+// Capture Trace window's own banner), unlike wpr.exe which ships in-box, so
+// this can fail with a plain "not found" if it isn't installed -- surfaced
+// to the caller rather than silently swallowed like openCaptureFileLocation,
+// since "nothing happened" would otherwise look like a bug rather than a
+// missing optional tool.
+func openCaptureInWPA(path string) error {
+	if _, err := exec.LookPath("wpa.exe"); err != nil {
+		return fmt.Errorf("Windows Performance Analyzer (wpa.exe) isn't installed or isn't on PATH -- get it free from the Microsoft Store, or the Windows ADK's \"Windows Performance Toolkit\" component")
+	}
+	return exec.Command("wpa.exe", path).Start()
 }
 
 // "Now this is not the end. It is not even the beginning of the end. But it is, perhaps, the end of the beginning." Winston Churchill, November 10, 1942

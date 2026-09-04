@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"regexp"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -32,8 +34,13 @@ const (
 	sortDiskWrite
 	sortPrivate
 	sortHandles
-	sortAlert   // interference-watch indicator -- see interference.go; not sortable, see compareProc
-	sortNotable // AV/EDR recognition + process-masquerading heuristic -- see notable.go; not sortable, see compareProc
+	sortAlert       // interference-watch indicator -- see interference.go; not sortable, see compareProc
+	sortNotable     // AV/EDR recognition + process-masquerading heuristic -- see notable.go; not sortable, see compareProc
+	sortSigned      // background Authenticode check -- see signature_watcher.go; not sortable, see compareProc
+	sortNetSend     // live per-process network send rate -- see netio.go; not sortable, see compareProc
+	sortNetRecv     // live per-process network receive rate -- see netio.go; not sortable, see compareProc
+	sortDiskLatency // live per-process disk I/O latency -- see netio.go; not sortable, see compareProc
+	sortConnCount   // live per-process open TCP connection count -- see netio.go; not sortable, see compareProc
 )
 
 type procColumn struct {
@@ -43,20 +50,87 @@ type procColumn struct {
 	tooltip string
 }
 
-var procColumns = []procColumn{
-	{"⚠", sortAlert, 30, "Interference Watch: flags a process where a thread appeared with no backing module, a new module loaded, a thread's stack contains a third-party module, or Windows Defender scanned a file it opened (elevated only) -- see Interference Watch window for details. Select a process and click \"Watch for Interference\" to add it."},
-	{"PID", sortPID, 70, "Process ID"},
-	{"Name", sortName, 220, "Process/executable name"},
-	{"PPID", sortPPID, 70, "Parent process ID"},
-	{"User", sortUser, 110, "The account this process is running as"},
-	{"CPU %", sortCPU, 70, "Share of total CPU capacity this process is currently using"},
-	{"Mem %", sortMem, 70, "Share of total physical memory this process is currently using"},
-	{"Memory", sortMemBytes, 90, "Actual physical memory in use (RSS -- Resident Set Size), the same figure Mem % is computed from. In the Parent-processes view, this is the combined total across the parent and every descendant."},
-	{"Private", sortPrivate, 90, "Private memory: real Private Bytes on Windows, an RSS-minus-shared approximation on Linux, N/A on macOS (see Help)"},
-	{"Disk R", sortDiskRead, 80, "Disk read rate for this process (KB/s)"},
-	{"Disk W", sortDiskWrite, 80, "Disk write rate for this process (KB/s)"},
-	{"Handles", sortHandles, 80, "Open handles (Windows) / open file descriptors (macOS, Linux). A count that climbs steadily and never comes back down, even while the process otherwise looks idle, is a classic sign of a handle/fd leak"},
-	{"Notable", sortNotable, 160, "Recognized security software (best-effort name match -- see Help), or a process-masquerading mismatch worth a second look (e.g. svchost.exe not launched by services.exe)"},
+// procColumns is built once at package init, not a plain literal, so the
+// Signed column can be left out entirely on platforms where
+// signatureCheckSupported is false -- a disabled, permanently-blank column
+// with no way to hide it was worse than just not offering it (see the
+// "Check Signatures" checkbox below for the same reasoning).
+var procColumns = buildProcColumns()
+
+func buildProcColumns() []procColumn {
+	cols := []procColumn{
+		{"⚠", sortAlert, 30, "Interference Watch: flags a process where a thread appeared with no backing module, a new module loaded, a thread's stack contains a third-party module, or Windows Defender scanned a file it opened (elevated only) -- see Interference Watch window for details. Select a process and click \"Watch for Interference\" to add it."},
+		{"PID", sortPID, 70, "Process ID"},
+		{"Name", sortName, 220, "Process/executable name"},
+		{"PPID", sortPPID, 70, "Parent process ID"},
+		{"User", sortUser, 110, "The account this process is running as"},
+		{"CPU %", sortCPU, 70, "Share of total CPU capacity this process is currently using"},
+		{"Mem %", sortMem, 70, "Share of total physical memory this process is currently using"},
+		{"Memory", sortMemBytes, 90, "Actual physical memory in use (RSS -- Resident Set Size), the same figure Mem % is computed from. In the Parent-processes view, this is the combined total across the parent and every descendant."},
+		{"Private", sortPrivate, 90, "Private memory: real Private Bytes on Windows, an RSS-minus-shared approximation on Linux, N/A on macOS (see Help)"},
+		{"Disk R", sortDiskRead, 80, "Disk read rate for this process (KB/s)"},
+		{"Disk W", sortDiskWrite, 80, "Disk write rate for this process (KB/s)"},
+		{"Handles", sortHandles, 80, "Open handles (Windows) / open file descriptors (macOS, Linux). A count that climbs steadily and never comes back down, even while the process otherwise looks idle, is a classic sign of a handle/fd leak"},
+		{"Notable", sortNotable, 160, "Recognized security software (best-effort name match -- see Help), or a process-masquerading mismatch worth a second look (e.g. svchost.exe not launched by services.exe)"},
+	}
+	if signatureCheckSupported {
+		cols = append(cols, procColumn{"Signed", sortSigned, 70, "Authenticode code-signing check: ✓ signed & trusted, ⚠ not signed, 🛑 signed with a problem -- see Help. Checked once in the background per process (\"Check Signatures\" below); may briefly show blank while still checking"})
+	}
+	if netIOSupported {
+		cols = append(cols,
+			procColumn{"Net Send", sortNetSend, 80, "Live per-process network send rate (ETW-based, Phase 2) -- see Help. Blank until \"Show Network/Disk I/O\" below is turned on"},
+			procColumn{"Net Recv", sortNetRecv, 80, "Live per-process network receive rate (ETW-based, Phase 2) -- see Help. Blank until \"Show Network/Disk I/O\" below is turned on"},
+			procColumn{"Disk Latency", sortDiskLatency, 100, "Average disk I/O completion latency attributed to this process (ETW-based, Phase 2) -- see Help. Blank until \"Show Network/Disk I/O\" below is turned on, or until this process has completed at least one disk I/O since"},
+			procColumn{"Connections", sortConnCount, 90, "Live count of this process's currently open TCP connections (ETW-based, Phase 2) -- see \"Show Connections\" for the detail behind the number. A quick way to spot which of several same-named processes (e.g. several Chrome renderers) is actually talking to the network right now. Blank until \"Show Network/Disk I/O\" below is turned on"},
+		)
+	}
+	return cols
+}
+
+// loadHiddenColumns reads the "Columns…" dialog's persisted choices (see
+// prefHiddenColumns), matching by title against the current procColumns --
+// a saved title that no longer matches any column (e.g. this platform
+// doesn't build that column at all, or a title was renamed) is silently
+// ignored rather than erroring. nonHideableColumn can never end up in the
+// returned set even if somehow saved (defensive; the dialog itself never
+// offers a checkbox for it).
+func loadHiddenColumns(a fyne.App) map[sortField]bool {
+	hidden := make(map[sortField]bool)
+	saved := a.Preferences().StringWithFallback(prefHiddenColumns, "")
+	if saved == "" {
+		return hidden
+	}
+	titles := make(map[string]bool)
+	for _, t := range strings.Split(saved, ",") {
+		titles[strings.TrimSpace(t)] = true
+	}
+	for _, col := range procColumns {
+		if col.field != nonHideableColumn && titles[col.title] {
+			hidden[col.field] = true
+		}
+	}
+	return hidden
+}
+
+func saveHiddenColumns(a fyne.App, hidden map[sortField]bool) {
+	var titles []string
+	for _, col := range procColumns {
+		if hidden[col.field] {
+			titles = append(titles, col.title)
+		}
+	}
+	a.Preferences().SetString(prefHiddenColumns, strings.Join(titles, ","))
+}
+
+// applyColumnWidths re-applies each visible column's configured width --
+// needed every time the column set changes (Table has no "insert/remove
+// column" API; the set of columns is just whatever the length-callback and
+// this report, so a width has to be (re-)pushed for the new arrangement)
+// rather than just once at construction.
+func applyColumnWidths(t *widget.Table, cols []procColumn) {
+	for i, col := range cols {
+		t.SetColumnWidth(i, col.width)
+	}
 }
 
 // consumerThresholdOptions/-Values back the "Top CPU"/"Top Mem" selects
@@ -98,6 +172,19 @@ const (
 	defaultDetailSplit    = 0.4
 )
 
+// prefHiddenColumns persists the "Columns…" dialog's choices (see
+// showColumnsDialog): a comma-separated list of hidden columns' titles,
+// chosen over their sortField int values so a future column insertion in
+// the middle of the sortField enum (unlikely -- every column added so far
+// has been appended at the end, but not guaranteed forever) can't silently
+// remap a saved preference onto the wrong column.
+const prefHiddenColumns = "processView.hiddenColumns"
+
+// nonHideableColumn is the one column showColumnsDialog never offers a
+// checkbox for and rebuildVisibleColumns never hides -- every row needs at
+// least one column that identifies which process it is.
+const nonHideableColumn = sortName
+
 // childDrilldownWindow/-Open mirror the state windows.go's hide-all/show-all
 // cares about, same reasoning as resourceview.go's resourceDetailWindow/
 // -Open: the window itself is owned by procViewState.childWin, but that's
@@ -137,9 +224,28 @@ type procViewState struct {
 	minDisk        float64 // KB/s (combined read+write), reuses resourceview.go's diskThresholdValues tiers
 	minMemBytes    uint64  // absolute RSS threshold, see memBytesThresholdValues -- distinct question from minMem's percentage
 	parentsOnly    bool    // "Parent processes" view -- see isParentRow
-	sortCol        sortField
-	sortAsc        bool
-	selectedPID    int32 // -1 = none
+
+	// notifyOnBreach and breachState back the "Notify on Threshold Breach"
+	// checkbox (see checkThresholdBreaches): a desktop notification fires
+	// the moment a process newly crosses one of the Top CPU/Mem/Memory/Disk
+	// thresholds above -- a rising-edge event, not "still above," so a
+	// process that stays hot doesn't spam a notification every tick.
+	// breachInitialized suppresses the very first check after enabling (or
+	// at launch) from notifying about processes already above threshold --
+	// establishes a silent baseline instead, same "don't cry wolf on the
+	// first check" precedent Interference Watch's own signals already use.
+	notifyOnBreach    bool
+	breachState       map[int32]procBreachState
+	breachInitialized bool
+	sortCol           sortField
+	sortAsc           bool
+	// sortActive is the third state in the header-click cycle (ascending ->
+	// descending -> unsorted -> ascending, ...): false means "unsorted" --
+	// rows shown in whatever order the last snapshot/filter produced them,
+	// no header arrow shown -- rather than only ever toggling between
+	// ascending and descending the way this used to work.
+	sortActive  bool
+	selectedPID int32 // -1 = none
 
 	// reselecting is true only while re-calling table.Select to preserve
 	// the already-selected row's highlight across a data refresh (every
@@ -155,6 +261,20 @@ type procViewState struct {
 	// relies on this same Select call triggering onRowSelected.
 	reselecting bool
 
+	// hiddenColumns/visibleColumns back the "Columns…" dialog (see
+	// showColumnsDialog): hiddenColumns is the persisted set of columns the
+	// user chose to hide (see prefHiddenColumns), and visibleColumns is
+	// procColumns filtered down to what's actually shown -- both the main
+	// table and the children drill-down window render from visibleColumns,
+	// rebuilt (rebuildVisibleColumns) whenever a checkbox in the dialog
+	// changes. Added after real feedback that this app's own growing column
+	// count (17 as of Phase 2 ETW's three new ones) was pushing the main
+	// window wider than a laptop display -- same complaint that prompted
+	// 0.4.0's "Narrower main window" toolbar-row split, just for columns
+	// instead of buttons.
+	hiddenColumns  map[sortField]bool
+	visibleColumns []procColumn
+
 	// watcher and flaggedPIDs back the interference-watch feature (see
 	// interference.go): watcher.check() runs once per recompute() (i.e. once
 	// per process-list sample), and flaggedPIDs is its latest result, read by
@@ -162,11 +282,38 @@ type procViewState struct {
 	watcher     *interferenceWatcher
 	flaggedPIDs map[int32]bool
 
+	// sigWatcher and sigResults back the background Signed/Unsigned column
+	// (see signature_watcher.go): check() runs once per recompute(), same as
+	// watcher.check() above, and sigResults is its latest per-PID cache, read
+	// by updateCell for the "Signed" column. checkSignaturesEnabled is the
+	// "Check Signatures" checkbox's state -- off just stops launching new
+	// checks, it doesn't clear what's already known.
+	sigWatcher             *signatureWatcher
+	sigResults             map[int32]SignatureResult
+	checkSignaturesEnabled bool
+
+	// netIOResults backs the live "Net Send"/"Net Recv"/"Disk Latency"
+	// columns (see netio.go, Phase 2 ETW continued): globalNetIOWatcher.check()
+	// runs once per recompute(), same slot as sigWatcher.check above (reading
+	// the package-level singleton directly, the same way interference.go's
+	// checkAVFileScan reads globalAVScanRelay -- not a per-instance field,
+	// since the ETW consumer feeding it is started/stopped independently of
+	// any particular view), and netIOResults is its latest per-PID rate.
+	// Unlike checkSignaturesEnabled (which just throttles an always-running
+	// background cache), toggling netIOEnabled actually starts/stops a real
+	// kernel-level ETW session (see the "Show Network/Disk I/O" checkbox
+	// below) -- there's real cost and an Administrator requirement to not
+	// incur silently, so this defaults to false unlike checkSignaturesEnabled.
+	netIOResults map[int32]netIOStats
+	netIOEnabled bool
+
 	table       *widget.Table
 	filterEntry *widget.Entry
 	threadsBtn  *ttwidget.Button
 	watchBtn    *ttwidget.Button
 	sigBtn      *ttwidget.Button
+	handlesBtn  *ttwidget.Button
+	connBtn     *ttwidget.Button
 	endBtn      *ttwidget.Button
 
 	detailTitle    *widget.Label
@@ -189,6 +336,7 @@ type procViewState struct {
 	childWinFilterText  string
 	childWinSortCol     sortField
 	childWinSortAsc     bool
+	childWinSortActive  bool  // same 3-state cycle as sortActive above
 	childWinSelectedPID int32 // -1 = none
 	childWinTable       *widget.Table
 	childWinFilterEntry *widget.Entry
@@ -211,6 +359,30 @@ type procViewState struct {
 	threadsWinTableSection fyne.CanvasObject
 	threadsWinCountLabel   *widget.Label
 	threadsWinStack        *fyne.Container
+
+	// handlesWin* mirror threadsWin* above exactly -- see handlesview.go.
+	handlesWin             fyne.Window
+	handlesWinPID          int32 // pid currently shown, -1 = none
+	handlesWinSummary      HandleSummary
+	handlesWinTable        *widget.Table
+	handlesWinBanner       *widget.Label
+	handlesWinTableSection fyne.CanvasObject
+	handlesWinCountLabel   *widget.Label
+	handlesWinStack        *fyne.Container
+
+	// connWin is the single reusable "Show Connections" window (see
+	// connectionsview.go) -- Windows-only, gated the same way as the "Show
+	// Network/Disk I/O" checkbox (netIOSupported). Unlike threadsWin/
+	// handlesWin (a fresh on-demand snapshot per selection change) this
+	// polls every applySnapshot tick like childWin does, because the data
+	// behind it -- globalNetIOWatcher.connActive -- is itself continuously
+	// updated by the live ETW session, not something worth re-fetching on a
+	// timer of its own.
+	connWin           fyne.Window
+	connWinPID        int32 // pid currently shown, -1 = none
+	connWinRows       []tcpConnection
+	connWinTable      *widget.Table
+	connWinCountLabel *widget.Label
 }
 
 // newProcessView builds the process table, toolbar and detail pane. The
@@ -229,19 +401,25 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	jumpToPID func(int32),
 ) {
 	st := &procViewState{
-		app:           a,
-		win:           win,
-		sampler:       sampler,
-		selectedPID:   -1,
-		childWinPID:   -1,
-		threadsWinPID: -1,
-		sortCol:       sortCPU,
-		sortAsc:       false,
-		watcher:       newInterferenceWatcher(),
+		app:                    a,
+		win:                    win,
+		sampler:                sampler,
+		selectedPID:            -1,
+		childWinPID:            -1,
+		threadsWinPID:          -1,
+		handlesWinPID:          -1,
+		connWinPID:             -1,
+		sortCol:                sortCPU,
+		sortAsc:                false,
+		sortActive:             true,
+		watcher:                newInterferenceWatcher(),
+		sigWatcher:             newSignatureWatcher(),
+		checkSignaturesEnabled: true,
+		hiddenColumns:          loadHiddenColumns(a),
 	}
 
 	st.table = widget.NewTable(
-		func() (int, int) { return len(st.displayRows), len(procColumns) },
+		func() (int, int) { return len(st.displayRows), len(st.visibleColumns) },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
 		st.updateCell,
 	)
@@ -250,9 +428,7 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	st.table.UpdateHeader = st.updateHeader
 	st.table.OnSelected = st.onRowSelected
 	st.table.OnUnselected = st.onRowUnselected
-	for i, col := range procColumns {
-		st.table.SetColumnWidth(i, col.width)
-	}
+	st.rebuildVisibleColumns()
 
 	topInfo, childrenSection := st.buildDetailPane()
 
@@ -284,6 +460,57 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	})
 	parentsOnlyCheck.SetToolTip("Show only processes with children (or no visible parent), each with combined CPU%/Mem% across itself and its whole subtree. Click a row to see its individual children.")
 
+	// Background Signed/Unsigned column (see signature_watcher.go): on by
+	// default since the check is cheap, cached per-PID, and rate-limited --
+	// this just gives an escape hatch, same as the backlog note that
+	// prompted the column asked for ("user option ... whatever is lowest
+	// resource use"). Turning it off doesn't clear icons already resolved,
+	// just stops resolving new ones.
+	//
+	// Not built at all on a platform where the column itself doesn't exist
+	// (see buildProcColumns) -- an earlier version showed this permanently
+	// disabled instead ("(Windows only)"), which just left a dead, grayed-out
+	// checkbox with no way to interact with it controlling a column that was
+	// never going to show anything anyway. Nothing to turn off beats
+	// something you can't turn off.
+	var checkSignaturesCheck *ttwidget.Check
+	if signatureCheckSupported {
+		checkSignaturesCheck = ttwidget.NewCheck("Check Signatures", func(checked bool) {
+			st.checkSignaturesEnabled = checked
+		})
+		checkSignaturesCheck.SetChecked(true)
+		checkSignaturesCheck.SetToolTip("Background Authenticode check feeding the Signed column -- checked once per process, at a throttled rate")
+	}
+
+	// Live "Net Send"/"Net Recv"/"Disk Latency" columns (see netio.go, Phase
+	// 2 ETW continued): unlike Check Signatures above, defaults OFF -- this
+	// checkbox is what actually starts/stops a real kernel-level ETW
+	// session (Administrator required), not just a throttle on an
+	// already-running background cache, so it shouldn't turn on silently.
+	// Toggling it on starts the session and surfaces any failure (most
+	// commonly: not elevated, or -- on Windows 10 only -- Capture Trace
+	// already running, see netio_windows.go's mutual-exclusion check) as a
+	// dialog rather than doing nothing the way startAVMonitor's own
+	// always-on best-effort call does, since this IS a deliberate user
+	// action with its own checkbox, same reasoning Capture Trace's own
+	// error surfacing already follows.
+	var netIOCheck *ttwidget.Check
+	if netIOSupported {
+		netIOCheck = ttwidget.NewCheck("Show Network/Disk I/O", func(checked bool) {
+			if checked {
+				if err := startNetIOMonitor(); err != nil {
+					dialog.ShowError(err, st.win)
+					netIOCheck.SetChecked(false)
+					return
+				}
+			} else {
+				stopNetIOMonitor()
+			}
+			st.netIOEnabled = checked
+		})
+		netIOCheck.SetToolTip("Live per-process network throughput and disk I/O latency (ETW-based, Windows-only, needs Administrator) -- feeds the Net Send/Net Recv/Disk Latency columns. Starts a real kernel tracing session while on")
+	}
+
 	intervalSelect := ttwidget.NewSelect([]string{"1s", "2s", "5s", "10s"}, func(sel string) {
 		if d, err := time.ParseDuration(sel); err == nil {
 			sampler.SetProcessInterval(d)
@@ -294,8 +521,10 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 
 	// "Top consumer" filter: surfaces anything heavy on CPU, memory, or disk
 	// I/O. Off by default so behavior is unchanged unless the user opts in.
-	// No per-process network use here -- no platform offers a simple API
-	// for it (Windows' own Task Manager relies on ETW tracing for that).
+	// No "Top Network" threshold here -- unlike CPU/Mem/Disk, the live "Net
+	// Send"/"Net Recv" columns below only populate at all when "Show
+	// Network/Disk I/O" is on (Windows-only, Administrator-required), so a
+	// filter on them would silently hide everything whenever that's off.
 	cpuThresholdSelect := ttwidget.NewSelect(consumerThresholdOptions, func(sel string) {
 		st.minCPU = consumerThresholdValues[sel]
 		st.applyFilterAndRefresh()
@@ -321,6 +550,16 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	diskThresholdSelect.SetSelected("Off")
 	diskThresholdSelect.SetToolTip("Hide processes below this combined read+write rate (combines with the other Top filters via OR: a process passes if it clears any one)")
 
+	// Off by default -- a desktop notification is a background-monitoring
+	// convenience, not something that should start firing unasked the
+	// moment a threshold happens to already be set. Reuses whichever of the
+	// four Top thresholds above are actually enabled; leaving all of them
+	// at Off means this simply never fires, no separate configuration.
+	notifyBreachCheck := ttwidget.NewCheck("Notify on Threshold Breach", func(checked bool) {
+		st.notifyOnBreach = checked
+	})
+	notifyBreachCheck.SetToolTip("Send a desktop notification the moment a process newly crosses one of the Top CPU/Mem/Memory/Disk thresholds above -- not on every tick it's still above. Thresholds left at Off never notify.")
+
 	// Absolute-byte complement to "Top Mem"'s percentage -- 5% means a very
 	// different amount of memory on a 16GB laptop than on a 128GB
 	// workstation, so this answers a genuinely different question, not
@@ -334,6 +573,10 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 
 	refreshBtn := ttwidget.NewButton("Refresh Now", func() { sampler.RefreshProcessesNow() })
 	refreshBtn.SetToolTip("Resample the process list immediately instead of waiting for the next tick")
+	columnsBtn := ttwidget.NewButton("Columns…", st.showColumnsDialog)
+	columnsBtn.SetToolTip("Hide columns you don't need -- helps the table fit a narrower display")
+	exportBtn := ttwidget.NewButton("Export CSV…", st.exportCSV)
+	exportBtn.SetToolTip("Save the current view (visible columns, current filter/sort) to a CSV file")
 	st.threadsBtn = ttwidget.NewButton("Show Threads", st.showThreadsForSelected)
 	st.threadsBtn.SetToolTip("One-off snapshot of the selected process's threads, including start-address resolution on Windows (see Help)")
 	st.threadsBtn.Disable()
@@ -354,6 +597,16 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 		st.sigBtn.SetText("Check Signature (Windows only)")
 		st.sigBtn.SetToolTip("Needs Windows' Authenticode/WinVerifyTrust API -- see Help")
 	}
+	st.handlesBtn = ttwidget.NewButton("Show Handles", st.showHandlesForSelected)
+	st.handlesBtn.SetToolTip("One-off snapshot of the selected process's open handles/file descriptors and what each one points to, where resolvable -- see Help")
+	st.handlesBtn.Disable()
+	st.connBtn = ttwidget.NewButton("Show Connections", st.showConnectionsForSelected)
+	st.connBtn.SetToolTip("Live list of the selected process's open TCP connections (ETW-based, Windows-only) -- see Help. Empty until \"Show Network/Disk I/O\" above is turned on")
+	st.connBtn.Disable()
+	if !netIOSupported {
+		st.connBtn.SetText("Show Connections (Windows only)")
+		st.connBtn.SetToolTip("Needs the same ETW session as \"Show Network/Disk I/O\" -- see Help")
+	}
 	st.endBtn = ttwidget.NewButton("End Process", st.endSelected)
 	st.endBtn.SetToolTip("Terminate the selected process (with a confirmation prompt first)")
 	st.endBtn.Importance = widget.DangerImportance
@@ -363,17 +616,25 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 	// one row alongside every other toolbar control (as it was originally),
 	// it was too narrow to read or type a regex into comfortably.
 	filterRow := container.NewBorder(nil, nil, nil,
-		container.NewHBox(regexCheck, refreshBtn, widget.NewLabel("Refresh every"), intervalSelect),
+		container.NewHBox(regexCheck, refreshBtn, widget.NewLabel("Refresh every"), intervalSelect, columnsBtn, exportBtn),
 		st.filterEntry,
 	)
 
-	optionsRow := container.NewHBox(
-		parentsOnlyCheck,
+	optionsRowItems := []fyne.CanvasObject{parentsOnlyCheck}
+	if checkSignaturesCheck != nil {
+		optionsRowItems = append(optionsRowItems, checkSignaturesCheck)
+	}
+	if netIOCheck != nil {
+		optionsRowItems = append(optionsRowItems, netIOCheck)
+	}
+	optionsRowItems = append(optionsRowItems,
 		widget.NewLabel("Top CPU"), cpuThresholdSelect,
 		widget.NewLabel("Top Mem"), memThresholdSelect,
 		widget.NewLabel("Top Memory"), memBytesThresholdSelect,
 		widget.NewLabel("Top Disk"), diskThresholdSelect,
+		notifyBreachCheck,
 	)
+	optionsRow := container.NewHBox(optionsRowItems...)
 
 	// Selected-process actions get their own row rather than crowding onto
 	// optionsRow -- keeping everything on one wide row was pushing the main
@@ -383,6 +644,8 @@ func newProcessView(a fyne.App, win fyne.Window, sampler *Sampler) (
 		st.threadsBtn,
 		st.watchBtn,
 		st.sigBtn,
+		st.handlesBtn,
+		st.connBtn,
 		st.endBtn,
 	)
 
@@ -441,6 +704,62 @@ func (st *procViewState) refreshAfterWatchChange() {
 	st.table.Refresh()
 }
 
+// rebuildVisibleColumns recomputes visibleColumns from procColumns +
+// hiddenColumns and re-applies it to both the main table and (if currently
+// open) the children drill-down window, which shares the exact same column
+// set. Called once at construction (before childWinTable exists -- hence
+// the nil guard) and every time showColumnsDialog's checkboxes change.
+func (st *procViewState) rebuildVisibleColumns() {
+	visible := make([]procColumn, 0, len(procColumns))
+	for _, col := range procColumns {
+		if !st.hiddenColumns[col.field] {
+			visible = append(visible, col)
+		}
+	}
+	st.visibleColumns = visible
+
+	applyColumnWidths(st.table, st.visibleColumns)
+	st.table.Refresh()
+	if st.childWinTable != nil {
+		applyColumnWidths(st.childWinTable, st.visibleColumns)
+		st.childWinTable.Refresh()
+	}
+}
+
+// showColumnsDialog lets the user hide/show individual columns -- added
+// after real feedback that Phase 2 ETW's three new columns pushed the
+// already-long column list (17 as of this feature) past what a laptop
+// display can show without horizontal scrolling. One checkbox per column
+// except nonHideableColumn (every row needs at least one column that says
+// which process it is), checked/unchecked reflecting the live
+// hiddenColumns set. Applies and persists immediately on every change
+// rather than needing an OK/Cancel -- consistent with every other
+// checkbox/select in this toolbar (e.g. "Parent processes only", the Top
+// CPU/Mem selects), none of which wait for a confirm step either.
+func (st *procViewState) showColumnsDialog() {
+	items := make([]fyne.CanvasObject, 0, len(procColumns))
+	for _, col := range procColumns {
+		if col.field == nonHideableColumn {
+			continue
+		}
+		field := col.field
+		check := ttwidget.NewCheck(col.title, func(checked bool) {
+			if checked {
+				delete(st.hiddenColumns, field)
+			} else {
+				st.hiddenColumns[field] = true
+			}
+			saveHiddenColumns(st.app, st.hiddenColumns)
+			st.rebuildVisibleColumns()
+		})
+		check.SetChecked(!st.hiddenColumns[field])
+		check.SetToolTip(col.tooltip)
+		items = append(items, check)
+	}
+	content := container.NewVBox(items...)
+	dialog.ShowCustom("Columns", "Close", content, st.win)
+}
+
 // buildDetailPane returns the upper info block (title/meta/ancestry/cmdline)
 // and the children-list section separately so the caller can put a
 // draggable split between them instead of stacking both in one VBox.
@@ -492,6 +811,7 @@ func (st *procViewState) applySnapshot(snap ProcessSnapshot) {
 	st.full = snap
 	st.recompute()
 	st.refreshChildWindow()
+	st.refreshConnectionsWindow()
 
 	if idx, ok := indexOfPID(st.displayRows, st.selectedPID); ok {
 		st.reselecting = true
@@ -521,6 +841,23 @@ func (st *procViewState) recompute() {
 	// doc comment for why this is cheap even though it runs unconditionally
 	// (a no-op when nothing is being watched).
 	st.flaggedPIDs = st.watcher.check(st.byPID)
+
+	// One background-signature-check cycle per sample tick, same cadence as
+	// the interference watcher above -- see signature_watcher.go for why
+	// this is cheap even though it runs unconditionally (a no-op once every
+	// currently-running PID has a cached result, or when the checkbox is
+	// off).
+	st.sigResults = st.sigWatcher.check(st.byPID, st.checkSignaturesEnabled)
+
+	// One live network/disk-latency rate computation per sample tick, same
+	// cadence as the two checks above -- see netio.go for why this reads
+	// the package-level globalNetIOWatcher rather than an instance field.
+	st.netIOResults = globalNetIOWatcher.check(st.byPID, st.netIOEnabled)
+
+	// Threshold-breach notifications, same per-tick cadence as the checks
+	// above -- see checkThresholdBreaches for why this runs off the raw
+	// byPID map rather than the filtered/sorted rows computed below.
+	st.checkThresholdBreaches(st.byPID)
 
 	// hasChildPID marks every PID that is some other process's parent, and
 	// childPIDs maps a PID to its direct children's PIDs -- both computed
@@ -559,13 +896,18 @@ func (st *procViewState) recompute() {
 		rows = append(rows, p)
 	}
 
-	sort.SliceStable(rows, func(i, j int) bool {
-		c := compareProc(rows[i], rows[j], st.sortCol)
-		if st.sortAsc {
-			return c < 0
-		}
-		return c > 0
-	})
+	// Unsorted (the third state in the header-click cycle, see toggleSort)
+	// leaves rows in whatever order the filter loop above produced them --
+	// no header arrow shown either, matching updateHeader.
+	if st.sortActive {
+		sort.SliceStable(rows, func(i, j int) bool {
+			c := compareProc(rows[i], rows[j], st.sortCol)
+			if st.sortAsc {
+				return c < 0
+			}
+			return c > 0
+		})
+	}
 
 	st.displayRows = rows
 }
@@ -592,6 +934,74 @@ func (st *procViewState) passesConsumerThreshold(p ProcInfo) bool {
 		return true
 	}
 	return false
+}
+
+// procBreachState is one process's latest known standing against each of
+// the four Top thresholds, as of the last checkThresholdBreaches call --
+// compared against the next tick's standing to detect a rising edge.
+type procBreachState struct {
+	cpu, mem, memBytes, disk bool
+}
+
+// checkThresholdBreaches sends a desktop notification the instant a process
+// newly crosses one of the enabled Top CPU/Mem/Memory/Disk thresholds (the
+// exact same thresholds the table's own Top filters already use -- a
+// threshold left at "Off" here just never breaches, no separate
+// notification-specific configuration needed). Runs off byPID (every
+// currently-running process), not displayRows, so a breach is caught even
+// while the name filter or Parent-processes view is hiding that row.
+//
+// Pruning stale PIDs runs unconditionally (cheap, keeps the map from
+// growing forever across a long session), but the breach comparison itself
+// only runs when notifyOnBreach is on.
+func (st *procViewState) checkThresholdBreaches(byPID map[int32]ProcInfo) {
+	if st.breachState == nil {
+		st.breachState = make(map[int32]procBreachState)
+	}
+	for pid := range st.breachState {
+		if _, alive := byPID[pid]; !alive {
+			delete(st.breachState, pid)
+		}
+	}
+	if !st.notifyOnBreach {
+		st.breachInitialized = false // re-establish a fresh baseline next time this is turned back on
+		return
+	}
+
+	firstPass := !st.breachInitialized
+	st.breachInitialized = true
+
+	for pid, p := range byPID {
+		prev := st.breachState[pid]
+		next := procBreachState{
+			cpu:      st.minCPU > 0 && p.CPUPercent >= st.minCPU,
+			mem:      st.minMem > 0 && float64(p.MemPercent) >= st.minMem,
+			memBytes: st.minMemBytes > 0 && p.RSSBytes >= st.minMemBytes,
+			disk:     st.minDisk > 0 && p.DiskReadKBs+p.DiskWriteKBs >= st.minDisk,
+		}
+		if !firstPass {
+			if next.cpu && !prev.cpu {
+				st.sendBreachNotification(p, fmt.Sprintf("CPU %.1f%% (Top CPU threshold)", p.CPUPercent))
+			}
+			if next.mem && !prev.mem {
+				st.sendBreachNotification(p, fmt.Sprintf("Mem %.1f%% (Top Mem threshold)", p.MemPercent))
+			}
+			if next.memBytes && !prev.memBytes {
+				st.sendBreachNotification(p, fmt.Sprintf("Memory %s (Top Memory threshold)", formatBytes(p.RSSBytes)))
+			}
+			if next.disk && !prev.disk {
+				st.sendBreachNotification(p, fmt.Sprintf("Disk %.0f K/s (Top Disk threshold)", p.DiskReadKBs+p.DiskWriteKBs))
+			}
+		}
+		st.breachState[pid] = next
+	}
+}
+
+func (st *procViewState) sendBreachNotification(p ProcInfo, detail string) {
+	st.app.SendNotification(fyne.NewNotification(
+		fmt.Sprintf("%s (PID %d)", p.Name, p.PID),
+		detail,
+	))
 }
 
 // isParentRow implements the "Parent processes" view's declutter rule: a
@@ -699,6 +1109,10 @@ func compareProc(a, b ProcInfo, field sortField) int {
 		return 0 // flagged status lives in procViewState.flaggedPIDs, not on ProcInfo -- not sortable
 	case sortNotable:
 		return 0 // needs the byPID map for the masquerade check, not on ProcInfo alone -- not sortable
+	case sortSigned:
+		return 0 // lives in procViewState.sigResults, not on ProcInfo -- not sortable
+	case sortNetSend, sortNetRecv, sortDiskLatency, sortConnCount:
+		return 0 // lives in procViewState.netIOResults, not on ProcInfo -- not sortable
 	default:
 		return 0
 	}
@@ -768,16 +1182,172 @@ func classifyNotableProcess(p ProcInfo, byPID map[int32]ProcInfo) (text string, 
 	return "", widget.MediumImportance
 }
 
+// signatureColumnGlyph renders the Signed column's icon for one process,
+// using the same ✓/⚠/🛑 -> Success/Warning/Danger convention
+// watchedPIDStatus already established for Interference Watch
+// (interferenceview.go) -- one severity vocabulary across the app. A missing
+// cache entry (not yet checked -- see signature_watcher.go's per-tick
+// budget) and SignatureUnknown (platform unsupported) both render blank
+// rather than a fourth icon, so "still working on it" and "can't ever know"
+// don't read as alarms.
+func signatureColumnGlyph(res SignatureResult, checked bool) (text string, importance widget.Importance) {
+	if !checked {
+		return "", widget.MediumImportance
+	}
+	switch res.Status {
+	case SignatureValid:
+		return "✓", widget.SuccessImportance
+	case SignatureUnsigned:
+		return "⚠", widget.WarningImportance
+	case SignatureInvalid:
+		return "🛑", widget.DangerImportance
+	default:
+		return "", widget.MediumImportance
+	}
+}
+
+// netIOCellText renders one of the four live network/disk-I/O columns for
+// pid, given the current recompute() cycle's netIOResults -- shared by the
+// main table and the children drill-down window's own copy of these columns
+// (both render from the same procColumns), same as signatureColumnGlyph is
+// shared above. Blank whenever nothing's known yet for pid (checkbox off,
+// not started, or -- for latency specifically -- no disk I/O completion seen
+// for this process since the session started), same "still working on it,
+// not an alarm" blank convention signatureColumnGlyph established. Unlike
+// latency, a 0 connection count is shown as "0", not blank -- it's a
+// confirmed answer ("no open connections right now"), not an unknown one,
+// the same distinction DiskLatencySamples draws for latency specifically.
+func netIOCellText(results map[int32]netIOStats, pid int32, field sortField) string {
+	stats, ok := results[pid]
+	if !ok {
+		return ""
+	}
+	switch field {
+	case sortNetSend:
+		return fmt.Sprintf("%.0f K/s", stats.NetSendKBs)
+	case sortNetRecv:
+		return fmt.Sprintf("%.0f K/s", stats.NetRecvKBs)
+	case sortDiskLatency:
+		if stats.DiskLatencySamples == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%.1f ms", stats.DiskLatencyMs)
+	case sortConnCount:
+		return strconv.Itoa(stats.ConnCount)
+	default:
+		return ""
+	}
+}
+
+// csvCellText returns field's plain-text value for p -- the same content
+// updateCell renders on screen, minus the width-based ellipsizing Name/User/
+// Notable get there (a fixed-width table cell's problem, not a spreadsheet
+// column's). Shared with exportCSV so an exported row always matches what's
+// on screen, just without truncation.
+func (st *procViewState) csvCellText(p ProcInfo, field sortField) string {
+	switch field {
+	case sortAlert:
+		if st.flaggedPIDs[p.PID] {
+			return "⚠"
+		}
+		return ""
+	case sortNotable:
+		text, _ := classifyNotableProcess(p, st.byPID)
+		return text
+	case sortSigned:
+		res, checked := st.sigResults[p.PID]
+		text, _ := signatureColumnGlyph(res, checked)
+		return text
+	case sortNetSend, sortNetRecv, sortDiskLatency, sortConnCount:
+		return netIOCellText(st.netIOResults, p.PID, field)
+	case sortPID:
+		return strconv.Itoa(int(p.PID))
+	case sortName:
+		return p.Name
+	case sortPPID:
+		return strconv.Itoa(int(p.PPID))
+	case sortUser:
+		return orNA(p.Username)
+	case sortCPU:
+		return fmt.Sprintf("%.1f", p.CPUPercent)
+	case sortMem:
+		return fmt.Sprintf("%.1f", p.MemPercent)
+	case sortMemBytes:
+		return formatBytes(p.RSSBytes)
+	case sortDiskRead:
+		return fmt.Sprintf("%.0f", p.DiskReadKBs)
+	case sortDiskWrite:
+		return fmt.Sprintf("%.0f", p.DiskWriteKBs)
+	case sortPrivate:
+		if p.PrivateBytes == 0 {
+			return "N/A"
+		}
+		return formatBytes(p.PrivateBytes)
+	case sortHandles:
+		if p.HandleCount == 0 {
+			return "N/A"
+		}
+		return strconv.Itoa(int(p.HandleCount))
+	default:
+		return ""
+	}
+}
+
+// exportCSV writes the current view -- exactly the columns visible (see
+// "Columns…"), rows filtered/sorted as currently shown -- to a CSV file the
+// user picks via a save dialog. Same dialog.NewFileSave pattern
+// captureview.go's Stop && Save already uses, except this writes the file
+// directly (there's no external process like wpr.exe generating it).
+func (st *procViewState) exportCSV() {
+	fd := dialog.NewFileSave(func(uri fyne.URIWriteCloser, err error) {
+		if err != nil {
+			dialog.ShowError(err, st.win)
+			return
+		}
+		if uri == nil {
+			return // user cancelled the save dialog
+		}
+		defer uri.Close()
+
+		w := csv.NewWriter(uri)
+		header := make([]string, len(st.visibleColumns))
+		for i, col := range st.visibleColumns {
+			header[i] = col.title
+		}
+		if err := w.Write(header); err != nil {
+			dialog.ShowError(err, st.win)
+			return
+		}
+		row := make([]string, len(st.visibleColumns))
+		for _, p := range st.displayRows {
+			for i, col := range st.visibleColumns {
+				row[i] = st.csvCellText(p, col.field)
+			}
+			if err := w.Write(row); err != nil {
+				dialog.ShowError(err, st.win)
+				return
+			}
+		}
+		w.Flush()
+		if err := w.Error(); err != nil {
+			dialog.ShowError(err, st.win)
+		}
+	}, st.win)
+	fd.SetFileName(fmt.Sprintf("processes-%s.csv", time.Now().Format("2006-01-02-150405")))
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{".csv"}))
+	fd.Show()
+}
+
 // ── Table cell / header rendering ───────────────────────────────────────────
 
 func (st *procViewState) updateCell(id widget.TableCellID, o fyne.CanvasObject) {
 	label := o.(*widget.Label)
-	if id.Row < 0 || id.Row >= len(st.displayRows) || id.Col < 0 || id.Col >= len(procColumns) {
+	if id.Row < 0 || id.Row >= len(st.displayRows) || id.Col < 0 || id.Col >= len(st.visibleColumns) {
 		label.SetText("")
 		return
 	}
 	p := st.displayRows[id.Row]
-	switch procColumns[id.Col].field {
+	switch st.visibleColumns[id.Col].field {
 	case sortAlert:
 		if st.flaggedPIDs[p.PID] {
 			label.Importance = widget.WarningImportance
@@ -789,7 +1359,15 @@ func (st *procViewState) updateCell(id widget.TableCellID, o fyne.CanvasObject) 
 	case sortNotable:
 		text, importance := classifyNotableProcess(p, st.byPID)
 		label.Importance = importance
+		label.SetText(ellipsizeToWidth(text, label.Size().Width, label.TextStyle))
+	case sortSigned:
+		res, checked := st.sigResults[p.PID]
+		text, importance := signatureColumnGlyph(res, checked)
+		label.Importance = importance
 		label.SetText(text)
+	case sortNetSend, sortNetRecv, sortDiskLatency, sortConnCount:
+		label.Importance = widget.MediumImportance
+		label.SetText(netIOCellText(st.netIOResults, p.PID, st.visibleColumns[id.Col].field))
 	case sortPID:
 		label.SetText(strconv.Itoa(int(p.PID)))
 	case sortName:
@@ -801,7 +1379,7 @@ func (st *procViewState) updateCell(id widget.TableCellID, o fyne.CanvasObject) 
 	case sortPPID:
 		label.SetText(strconv.Itoa(int(p.PPID)))
 	case sortUser:
-		label.SetText(orNA(p.Username))
+		label.SetText(ellipsizeToWidth(orNA(p.Username), label.Size().Width, label.TextStyle))
 	case sortCPU:
 		label.SetText(fmt.Sprintf("%.1f", p.CPUPercent))
 	case sortMem:
@@ -829,13 +1407,13 @@ func (st *procViewState) updateCell(id widget.TableCellID, o fyne.CanvasObject) 
 
 func (st *procViewState) updateHeader(id widget.TableCellID, o fyne.CanvasObject) {
 	btn := o.(*ttwidget.Button)
-	if id.Col < 0 || id.Col >= len(procColumns) {
+	if id.Col < 0 || id.Col >= len(st.visibleColumns) {
 		btn.SetText("")
 		return
 	}
-	col := procColumns[id.Col]
+	col := st.visibleColumns[id.Col]
 	title := col.title
-	if col.field == st.sortCol {
+	if st.sortActive && col.field == st.sortCol {
 		if st.sortAsc {
 			title += " ▲"
 		} else {
@@ -848,12 +1426,21 @@ func (st *procViewState) updateHeader(id widget.TableCellID, o fyne.CanvasObject
 	btn.OnTapped = func() { st.toggleSort(field) }
 }
 
+// toggleSort cycles a header click through ascending -> descending ->
+// unsorted -> ascending, ... on the same column; clicking a *different*
+// column always jumps straight to ascending on the new one, same as before.
+// The unsorted state (see procViewState.sortActive) leaves rows in whatever
+// order recompute()'s filter loop produced them, with no header arrow shown.
 func (st *procViewState) toggleSort(field sortField) {
-	if st.sortCol == field {
-		st.sortAsc = !st.sortAsc
-	} else {
+	switch {
+	case !st.sortActive || st.sortCol != field:
 		st.sortCol = field
 		st.sortAsc = true
+		st.sortActive = true
+	case st.sortAsc:
+		st.sortAsc = false
+	default:
+		st.sortActive = false
 	}
 	st.recompute()
 	if idx, ok := indexOfPID(st.displayRows, st.selectedPID); ok {
@@ -957,10 +1544,14 @@ func (st *procViewState) renderDetail(p ProcInfo) {
 	st.childList.Refresh()
 
 	st.threadsBtn.Enable()
+	st.handlesBtn.Enable()
 	st.endBtn.Enable()
 	st.updateWatchBtn()
 	if signatureCheckSupported {
 		st.sigBtn.Enable()
+	}
+	if netIOSupported {
+		st.connBtn.Enable()
 	}
 
 	// If the Threads window is already open on some other process, follow
@@ -969,6 +1560,18 @@ func (st *procViewState) renderDetail(p ProcInfo) {
 	// window pointed at the old process (see openOrRefreshThreadsWindow).
 	if st.threadsWin != nil && st.threadsWinPID != p.PID {
 		st.openOrRefreshThreadsWindow(p.PID, p.Name)
+	}
+
+	// Same "follow the selection" behavior for the Handles window -- see
+	// openOrRefreshHandlesWindow.
+	if st.handlesWin != nil && st.handlesWinPID != p.PID {
+		st.openOrRefreshHandlesWindow(p.PID, p.Name)
+	}
+
+	// Same "follow the selection" behavior for the Connections window -- see
+	// openOrRefreshConnectionsWindow.
+	if st.connWin != nil && st.connWinPID != p.PID {
+		st.openOrRefreshConnectionsWindow(p.PID, p.Name)
 	}
 
 	pid, username := p.PID, p.Username
@@ -1007,6 +1610,8 @@ func (st *procViewState) clearDetail() {
 	st.threadsBtn.Disable()
 	st.watchBtn.Disable()
 	st.sigBtn.Disable()
+	st.handlesBtn.Disable()
+	st.connBtn.Disable()
 	st.endBtn.Disable()
 }
 
@@ -1023,6 +1628,36 @@ func (st *procViewState) showThreadsForSelected() {
 		return
 	}
 	st.openOrRefreshThreadsWindow(pid, p.Name)
+}
+
+// showHandlesForSelected opens the Handles window for the currently
+// selected process -- see handlesview.go's openOrRefreshHandlesWindow for
+// what it shows and why.
+func (st *procViewState) showHandlesForSelected() {
+	pid := st.selectedPID
+	if pid < 0 {
+		return
+	}
+	p, ok := st.byPID[pid]
+	if !ok {
+		return
+	}
+	st.openOrRefreshHandlesWindow(pid, p.Name)
+}
+
+// showConnectionsForSelected opens the Connections window for the currently
+// selected process -- see connectionsview.go's openOrRefreshConnectionsWindow
+// for what it shows and why.
+func (st *procViewState) showConnectionsForSelected() {
+	pid := st.selectedPID
+	if pid < 0 {
+		return
+	}
+	p, ok := st.byPID[pid]
+	if !ok {
+		return
+	}
+	st.openOrRefreshConnectionsWindow(pid, p.Name)
 }
 
 // checkSignatureForSelected runs an Authenticode check (see signature.go /
@@ -1127,6 +1762,7 @@ func (st *procViewState) showChildWindow(p ProcInfo) {
 	if st.childWin == nil {
 		st.childWinSortCol = sortCPU
 		st.childWinSortAsc = false
+		st.childWinSortActive = true
 		st.childWinSelectedPID = -1
 		st.buildChildWindow()
 	} else if changingParent {
@@ -1150,7 +1786,7 @@ func (st *procViewState) buildChildWindow() {
 	childDrilldownWindow = st.childWin
 
 	st.childWinTable = widget.NewTable(
-		func() (int, int) { return len(st.childWinDisplayRows), len(procColumns) },
+		func() (int, int) { return len(st.childWinDisplayRows), len(st.visibleColumns) },
 		func() fyne.CanvasObject { return widget.NewLabel("") },
 		st.updateChildWinCell,
 	)
@@ -1159,9 +1795,7 @@ func (st *procViewState) buildChildWindow() {
 	st.childWinTable.UpdateHeader = st.updateChildWinHeader
 	st.childWinTable.OnSelected = st.onChildWinRowSelected
 	st.childWinTable.OnUnselected = st.onChildWinRowUnselected
-	for i, col := range procColumns {
-		st.childWinTable.SetColumnWidth(i, col.width)
-	}
+	applyColumnWidths(st.childWinTable, st.visibleColumns)
 
 	st.childWinFilterEntry = widget.NewEntry()
 	st.childWinFilterEntry.SetPlaceHolder("Filter by name…")
@@ -1226,13 +1860,15 @@ func (st *procViewState) recomputeChildWinRows() {
 			rows = append(rows, p)
 		}
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		c := compareProc(rows[i], rows[j], st.childWinSortCol)
-		if st.childWinSortAsc {
-			return c < 0
-		}
-		return c > 0
-	})
+	if st.childWinSortActive {
+		sort.SliceStable(rows, func(i, j int) bool {
+			c := compareProc(rows[i], rows[j], st.childWinSortCol)
+			if st.childWinSortAsc {
+				return c < 0
+			}
+			return c > 0
+		})
+	}
 	st.childWinDisplayRows = rows
 
 	if idx, ok := indexOfPID(st.childWinDisplayRows, st.childWinSelectedPID); ok {
@@ -1247,12 +1883,12 @@ func (st *procViewState) recomputeChildWinRows() {
 
 func (st *procViewState) updateChildWinCell(id widget.TableCellID, o fyne.CanvasObject) {
 	label := o.(*widget.Label)
-	if id.Row < 0 || id.Row >= len(st.childWinDisplayRows) || id.Col < 0 || id.Col >= len(procColumns) {
+	if id.Row < 0 || id.Row >= len(st.childWinDisplayRows) || id.Col < 0 || id.Col >= len(st.visibleColumns) {
 		label.SetText("")
 		return
 	}
 	p := st.childWinDisplayRows[id.Row]
-	switch procColumns[id.Col].field {
+	switch st.visibleColumns[id.Col].field {
 	case sortAlert:
 		if st.flaggedPIDs[p.PID] {
 			label.Importance = widget.WarningImportance
@@ -1264,7 +1900,15 @@ func (st *procViewState) updateChildWinCell(id widget.TableCellID, o fyne.Canvas
 	case sortNotable:
 		text, importance := classifyNotableProcess(p, st.byPID)
 		label.Importance = importance
+		label.SetText(ellipsizeToWidth(text, label.Size().Width, label.TextStyle))
+	case sortSigned:
+		res, checked := st.sigResults[p.PID]
+		text, importance := signatureColumnGlyph(res, checked)
+		label.Importance = importance
 		label.SetText(text)
+	case sortNetSend, sortNetRecv, sortDiskLatency, sortConnCount:
+		label.Importance = widget.MediumImportance
+		label.SetText(netIOCellText(st.netIOResults, p.PID, st.visibleColumns[id.Col].field))
 	case sortPID:
 		label.SetText(strconv.Itoa(int(p.PID)))
 	case sortName:
@@ -1272,7 +1916,7 @@ func (st *procViewState) updateChildWinCell(id widget.TableCellID, o fyne.Canvas
 	case sortPPID:
 		label.SetText(strconv.Itoa(int(p.PPID)))
 	case sortUser:
-		label.SetText(orNA(p.Username))
+		label.SetText(ellipsizeToWidth(orNA(p.Username), label.Size().Width, label.TextStyle))
 	case sortCPU:
 		label.SetText(fmt.Sprintf("%.1f", p.CPUPercent))
 	case sortMem:
@@ -1300,13 +1944,13 @@ func (st *procViewState) updateChildWinCell(id widget.TableCellID, o fyne.Canvas
 
 func (st *procViewState) updateChildWinHeader(id widget.TableCellID, o fyne.CanvasObject) {
 	btn := o.(*ttwidget.Button)
-	if id.Col < 0 || id.Col >= len(procColumns) {
+	if id.Col < 0 || id.Col >= len(st.visibleColumns) {
 		btn.SetText("")
 		return
 	}
-	col := procColumns[id.Col]
+	col := st.visibleColumns[id.Col]
 	title := col.title
-	if col.field == st.childWinSortCol {
+	if st.childWinSortActive && col.field == st.childWinSortCol {
 		if st.childWinSortAsc {
 			title += " ▲"
 		} else {
@@ -1319,12 +1963,18 @@ func (st *procViewState) updateChildWinHeader(id widget.TableCellID, o fyne.Canv
 	btn.OnTapped = func() { st.toggleChildWinSort(field) }
 }
 
+// toggleChildWinSort mirrors toggleSort's ascending -> descending ->
+// unsorted -> ascending, ... cycle, scoped to this window's own sort state.
 func (st *procViewState) toggleChildWinSort(field sortField) {
-	if st.childWinSortCol == field {
-		st.childWinSortAsc = !st.childWinSortAsc
-	} else {
+	switch {
+	case !st.childWinSortActive || st.childWinSortCol != field:
 		st.childWinSortCol = field
 		st.childWinSortAsc = true
+		st.childWinSortActive = true
+	case st.childWinSortAsc:
+		st.childWinSortAsc = false
+	default:
+		st.childWinSortActive = false
 	}
 	st.recomputeChildWinRows()
 }
