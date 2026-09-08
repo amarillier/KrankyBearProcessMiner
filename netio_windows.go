@@ -96,6 +96,26 @@ func netIOUsingLegacySession() bool {
 // netio-debug.jsonl capture plus working UI columns) is what actually
 // shipping the modern path below is now based on -- not the earlier
 // zero-event finding.
+// wrapETWStartError adds a clear "run as Administrator" hint to a session
+// start/EnableProvider failure when this process isn't actually elevated.
+// ETW's own errors here are notoriously unhelpful for this specific case:
+// confirmed via real-world non-admin testing, the modern SystemTraceSession
+// path's EnableProvider call fails with a bare "EnableTraceEx2 failed for
+// provider (...): The parameter is incorrect" (ERROR_INVALID_PARAMETER) --
+// not "Access is denied" the way a missing-privilege failure would
+// naturally read. Checking real elevation state directly
+// (isCurrentProcessElevated, singleinstance_windows.go) is far more honest
+// than trying to pattern-match ETW's error text the way wrapWPRError does
+// for wpr.exe's own (much more legible) output -- if this process is
+// already elevated, some other real problem caused the failure and the
+// original error is left alone rather than mislabeled.
+func wrapETWStartError(err error) error {
+	if err == nil || isCurrentProcessElevated() {
+		return err
+	}
+	return fmt.Errorf("%w\n\nNetwork/Disk I/O monitoring needs Administrator rights (kernel-level tracing) -- close ProcessMiner and relaunch it as Administrator (right-click the app/shortcut -> \"Run as administrator\"), then try again.", err)
+}
+
 func startNetIOMonitor() error {
 	netIOMu.Lock()
 	defer netIOMu.Unlock()
@@ -128,7 +148,7 @@ func startNetIOMonitor() error {
 		// none.
 		s = etw.NewKernelRealTimeSession(etw.DiskIo, etw.TcpIp, etw.UdpIp)
 		if err := s.Start(); err != nil {
-			return err
+			return wrapETWStartError(err)
 		}
 	} else {
 		s = etw.NewSystemTraceSession("KrankyBearProcessMinerNetIO")
@@ -137,7 +157,7 @@ func startNetIOMonitor() error {
 			MatchAnyKeyword: etw.SYSTEM_IO_KW_DISK | etw.SYSTEM_IO_KW_NETWORK,
 		}
 		if err := s.EnableProvider(provider); err != nil {
-			return err
+			return wrapETWStartError(err)
 		}
 	}
 
@@ -149,7 +169,7 @@ func startNetIOMonitor() error {
 	if err := c.Start(); err != nil {
 		cancel()
 		s.Stop()
-		return err
+		return wrapETWStartError(err)
 	}
 
 	netIOSession = s

@@ -360,10 +360,35 @@ type procViewState struct {
 	threadsWinCountLabel   *widget.Label
 	threadsWinStack        *fyne.Container
 
-	// handlesWin* mirror threadsWin* above exactly -- see handlesview.go.
-	handlesWin             fyne.Window
-	handlesWinPID          int32 // pid currently shown, -1 = none
-	handlesWinSummary      HandleSummary
+	// handlesWin* mirror threadsWin* above with one difference: while open,
+	// it self-refreshes on every applySnapshot tick (throttled to
+	// handlesWinMinPollInterval, see refreshHandlesWindow) instead of only
+	// re-snapshotting on selection change, so the Activity column's
+	// read/write indicators stay live -- see handlesview.go.
+	handlesWin              fyne.Window
+	handlesWinPID           int32 // pid currently shown, -1 = none
+	handlesWinSummary       HandleSummary
+	handlesWinAllHandles    []HandleDetail // summary.Handles, pre-filter
+	handlesWinDisplay       []HandleDetail // handlesWinAllHandles after handlesWinFilterText
+	handlesWinFilterText    string
+	handlesWinFilterEntry   *widget.Entry
+	handlesWinFetchInFlight bool
+	// handlesWinActivity/-PrevSizeByKey/-LastPollAt back the Activity column:
+	// a size-delta-over-time computed by stat()ing each handle's resolved
+	// path across polls (see computeHandleActivity) -- reset whenever the
+	// tracked PID changes, since a new process's file sizes share nothing
+	// with the last one's.
+	handlesWinActivity      map[string]handleActivityTier
+	handlesWinPrevSizeByKey map[string]int64
+	handlesWinLastPollAt    time.Time
+	// handlesWinSortCol/-Asc/-Active are this window's own 3-state sort
+	// cycle (ascending -> descending -> unsorted -> ascending, ...),
+	// mirroring childWinSortCol et al but keyed by handleColumns index
+	// rather than sortField, since HandleDetail's columns have no
+	// equivalent in ProcInfo's sort vocabulary -- see compareHandle.
+	handlesWinSortCol      int
+	handlesWinSortAsc      bool
+	handlesWinSortActive   bool
 	handlesWinTable        *widget.Table
 	handlesWinBanner       *widget.Label
 	handlesWinTableSection fyne.CanvasObject
@@ -812,6 +837,7 @@ func (st *procViewState) applySnapshot(snap ProcessSnapshot) {
 	st.recompute()
 	st.refreshChildWindow()
 	st.refreshConnectionsWindow()
+	st.refreshHandlesWindow()
 
 	if idx, ok := indexOfPID(st.displayRows, st.selectedPID); ok {
 		st.reselecting = true

@@ -22,7 +22,79 @@ Some day maybe, maybe never - defer for now
   items above it, on top of the extra hand-rolled work. Revisit only if a
   failing disk actually causes a real support case.
 
-Version 0.7.0 - September 1, 2026
+
+Version 0.8.0 - September 08, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ NEW "Activity" column in the Handles window -- per-handle read/write busyness indicator
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Requested after using this app in place of Task Manager/Activity
+  Monitor/procmon/Process Explorer while watching a large-file migration
+  (Migrator: download -> stage to temp -> upload -> cleanup) and
+  wanting to see, at a glance, which open handle was actually busy rather
+  than just the process-level Disk R/W total.
+- No platform exposes a real per-handle byte counter (confirmed by reading
+  the actual gather code -- Windows' NtQueryObject, macOS's
+  proc_pidfdinfo, and Linux's /proc/<pid>/fd all resolve type+path only,
+  never I/O counts), so this is a best-effort proxy: every handle with a
+  resolved filesystem path is stat()ed on each poll, and its size delta
+  since the previous poll is turned into a KB/s rate -- the same
+  cumulative-counter -> per-tick-delta pattern (including the same
+  negative-delta clamp for a truncated/replaced file) already used for the
+  process-level Disk R/W columns in procsampler.go.
+- Renders as a small icon using the same Importance-driven color
+  convention as the Signed/Notable columns: ○ idle (no growth since last
+  poll), ● green/orange/red for light/medium/heavy write throughput
+  (>0 / 512+ / 4096+ KB/s), blank for handles with no size signal at all
+  (sockets, pipes, unresolved paths -- not a claim the handle is inactive,
+  same "blank isn't an alarm" discipline used elsewhere in this app).
+- Because reading a file doesn't change its size, this only lights up on
+  writes -- a handle being read heavily (e.g. the migrator's source file
+  during download) stays idle even while genuinely busy. Real per-handle
+  read activity would need an OS-level per-handle I/O counter, which
+  doesn't exist on any of the three platforms today; a possible
+  Windows-only follow-up would correlate the existing ETW file I/O events
+  by path instead, if this proves valuable enough to justify it.
+- The Handles window also gained a type/path filter box (same
+  substring-match convention as the child-process drilldown filter) and
+  now self-refreshes while open instead of being a one-shot snapshot --
+  throttled to a 3-second floor independent of the main "Refresh every"
+  setting, and piggybacked on the process sampler's existing tick rather
+  than a new ticker/goroutine, since re-listing handles does real
+  per-handle syscalls on Windows and macOS and shouldn't scale with how
+  fast the main table happens to be set to refresh.
+- Confirmed against real activity on macOS: watched Migrator's own
+  debug-log handle cycle through idle -> green -> amber -> red while it
+  wrote during a large-file migration test. Windows handle/network
+  behavior not yet verified this round.
+
+🐛 FIXED a confusing raw ETW error when enabling Network/Disk I/O without Administrator rights
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Found via real Windows testing this round: turning on "Show Network/Disk
+  I/O" without running elevated surfaced ETW's own raw error verbatim --
+  "EnableTraceEx2 failed for provider (...): The parameter is incorrect" --
+  which is genuinely misleading. ETW's ERROR_INVALID_PARAMETER here is the
+  real symptom of the modern SystemTraceSession path lacking
+  SeSystemProfilePrivilege, not "Access is denied" the way a missing-
+  privilege failure would naturally read, so nothing about the message
+  pointed at the actual fix.
+- Rather than pattern-match that unreliable text (the way wrapWPRError
+  already does for wpr.exe's own, much more legible, Capture Trace errors),
+  the new wrapETWStartError checks this process's real elevation state
+  directly (isCurrentProcessElevated, already used elsewhere for admin
+  detection) and, only when not elevated, appends a clear "close
+  ProcessMiner and relaunch it as Administrator" instruction to the
+  dialog. If the process is already elevated and the session still fails,
+  the original raw error is left untouched rather than mislabeled.
+- Scoped to the one place this failure actually reaches the user (the
+  "Show Network/Disk I/O" checkbox's session start) -- the parallel ETW
+  path for the 4th Interference Watch signal (Microsoft-Antimalware-
+  AMFilter) hits the same underlying failure mode without Administrator,
+  but that one is deliberately silent by design (a best-effort bonus
+  signal, not something the user explicitly asked to turn on the way this
+  checkbox is), so it was left as-is.
+
+
+Version 0.7.0 - September 01, 2026
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✨ NEW "Net Send"/"Net Recv"/"Disk Latency" columns (ETW Phase 2 continued, Windows-first)
 ▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
