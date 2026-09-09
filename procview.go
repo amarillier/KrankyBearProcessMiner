@@ -373,6 +373,12 @@ type procViewState struct {
 	handlesWinFilterText    string
 	handlesWinFilterEntry   *widget.Entry
 	handlesWinFetchInFlight bool
+	// handlesWinStatusLabel is the ● Live / ● Process exited indicator --
+	// see setHandlesWinLiveStatus. Exists because the window's native title
+	// bar text is easy to miss (no color, competes with the OS chrome), so
+	// the "handles shown are now a stale snapshot" state gets its own
+	// visible-in-content signal too.
+	handlesWinStatusLabel *widget.Label
 	// handlesWinActivity/-PrevSizeByKey/-LastPollAt back the Activity column:
 	// a size-delta-over-time computed by stat()ing each handle's resolved
 	// path across polls (see computeHandleActivity) -- reset whenever the

@@ -212,7 +212,11 @@ func (st *procViewState) buildHandlesWindow() {
 		st.recomputeHandlesWinRows()
 	}
 
-	content := container.NewBorder(st.handlesWinFilterEntry, nil, nil, nil, st.handlesWinStack)
+	st.handlesWinStatusLabel = widget.NewLabel("")
+	st.setHandlesWinLiveStatus(true)
+
+	topRow := container.NewBorder(nil, nil, nil, st.handlesWinStatusLabel, st.handlesWinFilterEntry)
+	content := container.NewBorder(topRow, nil, nil, nil, st.handlesWinStack)
 	st.handlesWin.SetContent(fynetooltip.AddWindowToolTipLayer(container.NewPadded(content), st.handlesWin.Canvas()))
 	st.handlesWin.Resize(fyne.NewSize(820, 480))
 
@@ -231,6 +235,24 @@ func (st *procViewState) buildHandlesWindow() {
 		st.handlesWinLastPollAt = time.Time{}
 		st.handlesWinFetchInFlight = false
 	})
+}
+
+// setHandlesWinLiveStatus updates the Handles window's ● Live / ● Process
+// exited indicator -- same glyph-plus-Importance shape as
+// handleActivityGlyph, but for the window as a whole rather than one row.
+// Exists because the "process exited (handles below are now a stale
+// snapshot)" state was previously only visible in the native title bar text
+// (see refreshHandlesWindow), which is easy to miss mid-investigation --
+// switching to a different, still-live process (openOrRefreshHandlesWindow)
+// must flip it back to Live.
+func (st *procViewState) setHandlesWinLiveStatus(live bool) {
+	if live {
+		st.handlesWinStatusLabel.Importance = widget.SuccessImportance
+		st.handlesWinStatusLabel.SetText("● Live")
+	} else {
+		st.handlesWinStatusLabel.Importance = widget.DangerImportance
+		st.handlesWinStatusLabel.SetText("● Process exited — showing last known handles")
+	}
 }
 
 // openOrRefreshHandlesWindow shows the single reusable Handles window for
@@ -253,6 +275,7 @@ func (st *procViewState) openOrRefreshHandlesWindow(pid int32, name string) {
 	st.handlesWinPrevSizeByKey = nil
 	st.handlesWinLastPollAt = time.Time{}
 	st.handlesWin.SetTitle(fmt.Sprintf("%s%s (PID %d) — Handles", adminTitlePrefix(), name, pid))
+	st.setHandlesWinLiveStatus(true)
 	st.handlesWinTableSection.Hide()
 	st.handlesWinCountLabel.SetText("Loading…")
 	st.handlesWinCountLabel.Show()
@@ -283,9 +306,11 @@ func (st *procViewState) refreshHandlesWindow() {
 	p, ok := st.byPID[st.handlesWinPID]
 	if !ok {
 		st.handlesWin.SetTitle(adminTitlePrefix() + "(process exited)")
+		st.setHandlesWinLiveStatus(false)
 		return
 	}
 	st.handlesWin.SetTitle(fmt.Sprintf("%s%s (PID %d) — Handles", adminTitlePrefix(), p.Name, p.PID))
+	st.setHandlesWinLiveStatus(true)
 	st.fetchHandles(p.PID, p.Name)
 }
 

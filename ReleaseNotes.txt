@@ -22,6 +22,24 @@ Some day maybe, maybe never - defer for now
   items above it, on top of the extra hand-rolled work. Revisit only if a
   failing disk actually causes a real support case.
 
+Version 0.8.1 - September 09, 2026
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔧 IMPROVED Handles window now shows a clear Live / Process-exited indicator
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+- Feedback on 0.8.0's new Activity column: once a process being watched
+  exits, the Handles window keeps showing its last known handles (useful
+  for a quick post-mortem look) and already said "(process exited)" -- but
+  only in the native title bar text, easy to miss mid-investigation since
+  it carries no color and sits among the OS's own window chrome.
+- New "● Live" / "● Process exited -- showing last known handles" label,
+  green/red via the same widget.Importance convention the Activity column's
+  own glyphs already use, docked next to the window's filter box so it's
+  always in view regardless of whether the title bar happens to be visible.
+  Flips the moment the same per-tick check that already updates the title
+  (refreshHandlesWindow) finds the tracked PID gone, and flips back to Live
+  immediately on switching to a different, still-running process -- no new
+  polling, just a second thing set at the point the answer was already
+  known.
 
 Version 0.8.0 - September 08, 2026
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

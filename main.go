@@ -24,7 +24,7 @@ import (
 
 const (
 	// appName    = "KrankyBear ProcessMiner"
-	appVersion = "0.8.0" // see FyneApp.toml
+	appVersion = "0.8.1" // see FyneApp.toml
 	appAuthor  = "Allan Marillier"
 	appID      = "com.github.amarillier.KrankyBearProcessMiner"
 )
